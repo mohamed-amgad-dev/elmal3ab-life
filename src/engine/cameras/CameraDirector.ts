@@ -51,8 +51,8 @@ function lerpAngle(a: number, b: number, t: number): number {
  */
 export class CameraDirector {
   private readonly camera: THREE.PerspectiveCamera;
-  private readonly currentPos = new THREE.Vector3(-42, 26, -24);
-  private readonly currentLook = new THREE.Vector3(0, 1, 0);
+  private readonly currentPos = new THREE.Vector3(18, 14.5, 15);
+  private readonly currentLook = new THREE.Vector3(0, 2.0, 0);
   private readonly desiredPos = new THREE.Vector3();
   private readonly desiredLook = new THREE.Vector3();
   private readonly tmpForward = new THREE.Vector3();
@@ -103,34 +103,41 @@ export class CameraDirector {
 
     switch (effectiveMode) {
       case 'menu_orbit': {
-        const angle = elapsed * 0.14;
-        const radius = 54;
-        const height = 23 + Math.sin(elapsed * 0.35) * 2.5;
-        this.desiredPos.set(Math.cos(angle) * radius, height, Math.sin(angle) * radius);
-        this.desiredLook.set(0, 1.8, 0);
-        this.desiredFov = 50;
+        // Elliptical orbit strictly inside the open stadium bowl (±25.8 X / ±35.8 Z, roof Y = 18.2)
+        // showcasing the glowing night turf, sponsor boards, crowd stands, and floodlight cones!
+        const angle = 0.55 + elapsed * 0.14;
+        const height = 14.5 + Math.sin(elapsed * 0.35) * 1.4;
+        this.desiredPos.set(
+          Math.cos(angle) * 21.0,
+          height,
+          Math.sin(angle) * 28.0
+        );
+        this.desiredLook.set(0, 2.0, 0);
+        this.desiredFov = 54;
         posLambda = 3.5;
         lookLambda = 4.5;
         break;
       }
 
       case 'broadcast_top': {
-        // PES-style elevated sideline view from -X looking across pitch toward +X benches
-        // From -X looking +X: +Z (Red attacks) is screen-right, -Z (Blue attacks) is screen-left!
-        const focusX = ctx.ballPos.x * 0.42;
+        // PES-style elevated sideline view from -X looking across pitch toward +X benches.
+        // Kept strictly inward of the West stand roof overhang (x ≈ -25.8, y = 18.2) for an unobstructed pitch view.
+        // From -X looking +X: +Z (Red attacks) is screen-right, -Z (Blue attacks) is screen-left.
+        const focusX = ctx.ballPos.x * 0.35;
         const focusZ = clamp(ctx.ballPos.z * 0.82, -ctx.config.halfLength * 0.78, ctx.config.halfLength * 0.78);
-        const goalBoost = ctx.phase === 'goal_celebration' ? 5.5 : 0;
+        const goalBoost = ctx.phase === 'goal_celebration' ? 4.2 : 0;
+        const camX = clamp(-24.0 + focusX * 0.28 + goalBoost * 0.55, -24.4, -16.5);
         this.desiredPos.set(
-          -34 + focusX * 0.35 + goalBoost * 0.65,
-          26 - goalBoost * 0.5,
-          focusZ * 0.74
+          camX,
+          21.6 - goalBoost * 0.45,
+          focusZ * 0.72
         );
         this.desiredLook.set(
-          focusX * 0.55,
-          0.9,
+          focusX * 0.5 - 1.5,
+          0.85,
           focusZ
         );
-        this.desiredFov = ctx.phase === 'goal_celebration' ? 42 : 48;
+        this.desiredFov = ctx.phase === 'goal_celebration' ? 45 : 55;
         posLambda = 5.2;
         lookLambda = 7.0;
         break;
@@ -255,15 +262,17 @@ export class CameraDirector {
       }
 
       case 'coach_touchline': {
+        // Positioned in front of the dugout overhang and coach sprite along the touchline for a clean pitch sightline
         const zone = ctx.config.coachZones[ctx.humanTeam];
-        const swayX = Math.sin(elapsed * 0.7) * 0.18;
-        this.desiredPos.set(zone.x + 2.8 + swayX, 3.1, zone.z);
+        const swayZ = Math.sin(elapsed * 0.7) * 0.25;
+        const zOffset = ctx.humanTeam === 'red' ? -1.4 : 1.4;
+        this.desiredPos.set(zone.x - 1.4, 3.7, zone.z + zOffset + swayZ);
         this.desiredLook.set(
-          clamp(ctx.ballPos.x * 0.55, -16, 12),
-          1.15,
+          clamp(ctx.ballPos.x * 0.55, -18, 12),
+          1.1,
           clamp(ctx.ballPos.z * 0.78, -28, 28)
         );
-        this.desiredFov = 52;
+        this.desiredFov = 54;
         posLambda = 5.5;
         lookLambda = 7.5;
         break;

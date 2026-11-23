@@ -446,17 +446,17 @@ export function drawSpeechBubbleCanvas(
   const bx = (w - bubbleW) / 2;
   const by = 14;
 
-  // Comic pop shadow
+  // Comic drop shadow
   ctx.save();
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
   ctx.beginPath();
-  ctx.roundRect(bx + 6, by + 8, bubbleW, bubbleH, 24);
+  ctx.roundRect(bx + 5, by + 7, bubbleW, bubbleH, 24);
   ctx.fill();
   ctx.restore();
 
-  // Bubble body
-  ctx.fillStyle = '#fffef7';
-  ctx.strokeStyle = '#111827';
+  // Bubble body (dark slate + warm gold border so it stays below UnrealBloomPass threshold)
+  ctx.fillStyle = 'rgba(10, 15, 32, 0.94)';
+  ctx.strokeStyle = '#ffd166';
   ctx.lineWidth = 6;
   ctx.beginPath();
   ctx.roundRect(bx, by, bubbleW, bubbleH, 24);
@@ -471,23 +471,23 @@ export function drawSpeechBubbleCanvas(
   ctx.lineTo(tx - 4, ty + 24);
   ctx.lineTo(tx + 14, ty);
   ctx.closePath();
-  ctx.fillStyle = '#fffef7';
+  ctx.fillStyle = 'rgba(10, 15, 32, 0.96)';
   ctx.fill();
   ctx.beginPath();
   ctx.moveTo(tx - 16, ty);
   ctx.lineTo(tx - 4, ty + 24);
   ctx.lineTo(tx + 14, ty);
-  ctx.strokeStyle = '#111827';
+  ctx.strokeStyle = '#ffd166';
   ctx.lineWidth = 6;
   ctx.lineJoin = 'round';
   ctx.stroke();
 
-  // Cover top seam of tail
-  ctx.fillStyle = '#fffef7';
-  ctx.fillRect(tx - 15, ty - 4, 28, 8);
+  // Cover top seam of tail cleanly
+  ctx.fillStyle = 'rgba(10, 15, 32, 0.98)';
+  ctx.fillRect(tx - 15, ty - 5, 28, 9);
 
-  // Text
-  ctx.fillStyle = '#0f172a';
+  // Crisp high-contrast Arabic text
+  ctx.fillStyle = '#ffffff';
   ctx.font = '900 34px Cairo, Tajawal, system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -997,6 +997,7 @@ export function buildCharacterMesh(player: PlayerEntityState): CharacterVisualPa
   const nameTagMat = track(
     new THREE.SpriteMaterial({
       map: nameTagTexture,
+      color: 0xd8d8d8,
       transparent: true,
       depthTest: false,
       depthWrite: false,
@@ -1018,6 +1019,7 @@ export function buildCharacterMesh(player: PlayerEntityState): CharacterVisualPa
   const bubbleMat = track(
     new THREE.SpriteMaterial({
       map: speechBubbleTexture,
+      color: 0xd0d0d0,
       transparent: true,
       depthTest: false,
       depthWrite: false,

@@ -311,10 +311,11 @@ export class StandsAndCrowd {
 
   private createSpectatorGeometry(): THREE.BufferGeometry {
     // Stylized low-poly cheering spectator with torso, head, and raised arms
+    // All 4 parts use indexed geometries with matching (position, normal, uv) attributes
     const torso = new THREE.BoxGeometry(0.54, 0.72, 0.34);
     torso.translate(0, 0.38, 0);
 
-    const head = new THREE.OctahedronGeometry(0.21, 1);
+    const head = new THREE.SphereGeometry(0.21, 8, 6);
     head.translate(0, 0.94, 0);
 
     const leftArm = new THREE.BoxGeometry(0.14, 0.48, 0.14);
@@ -330,7 +331,7 @@ export class StandsAndCrowd {
     head.dispose();
     leftArm.dispose();
     rightArm.dispose();
-    return merged;
+    return merged ?? new THREE.BoxGeometry(0.54, 1.1, 0.34);
   }
 
   private buildInstancedCrowd(): void {
@@ -593,9 +594,9 @@ export class StandsAndCrowd {
   }
 
   public dispose(): void {
-    for (const g of this.geometries) g.dispose();
-    for (const m of this.materials) m.dispose();
-    for (const t of this.textures) t.dispose();
+    for (const g of this.geometries) g?.dispose();
+    for (const m of this.materials) m?.dispose();
+    for (const t of this.textures) t?.dispose();
     this.geometries = [];
     this.materials = [];
     this.textures = [];

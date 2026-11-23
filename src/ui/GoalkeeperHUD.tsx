@@ -19,14 +19,14 @@ export default function GoalkeeperHUD() {
 
       <div className="absolute bottom-3 left-1/2 flex w-[760px] max-w-[calc(100vw-24px)] -translate-x-1/2 flex-col items-center gap-2">
         <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 rounded-full border border-amber-300/70 bg-amber-400/15 px-3 py-1 text-xs font-black text-amber-200 backdrop-blur-md">
+          <span className="flex items-center gap-1.5 rounded-full border border-amber-300/80 bg-slate-950/85 px-3 py-1 text-xs font-black text-amber-300 backdrop-blur-md">
             <Hand size={14} /> منظور شخصي 🧤 FP
           </span>
           <span
             className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-black whitespace-nowrap backdrop-blur-md ${
               ready
-                ? 'border-emerald-400/70 bg-emerald-500/15 text-emerald-200 glow-emerald'
-                : 'border-rose-400/60 bg-rose-500/15 text-rose-200'
+                ? 'border-emerald-400/80 bg-slate-950/85 text-emerald-300 glow-emerald'
+                : 'border-rose-400/70 bg-slate-950/85 text-rose-300'
             }`}
           >
             <Crosshair size={14} />
