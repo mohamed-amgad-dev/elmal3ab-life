@@ -54,12 +54,56 @@ export interface IBallPhysics {
     byPlayerId?: string,
     byTeam?: TeamId
   ): void;
+  kickWithSpin?(
+    dir: Vec3,
+    power: number,
+    lift: number,
+    curlSpinY: number,
+    isSuperShot: boolean,
+    byPlayerId?: string,
+    byTeam?: TeamId
+  ): void;
+  applyDribbleVelocity?(
+    targetVel: Vec3,
+    byPlayerId: string,
+    byTeam: TeamId
+  ): void;
+  syncPlayerColliders?(
+    players: Array<{
+      id: string;
+      pos: Vec3;
+      vx: number;
+      vz: number;
+      active: boolean;
+      isKickerCooldown: boolean;
+    }>
+  ): void;
+  isRapierReady?(): boolean;
   setPositionAndStop(pos: Vec3): void;
   setFrozen(frozen: boolean): void;
   setTrajectoryVisible(visible: boolean, targetGoalZ?: number): void;
   update(dt: number, config: StadiumConfig): BallTickResult;
   getVisualTransform(): { pos: Vec3; quat: [number, number, number, number] };
   applyVisualTransform(pos: Vec3, quat: [number, number, number, number]): void;
+  dispose(): void;
+}
+
+export interface AimingGuideParams {
+  visible: boolean;
+  playerPos: Vec3;
+  aimDir: Vec3;
+  charge: number;
+  curl: number;
+  isCharging: boolean;
+  ballPos: Vec3;
+  passTargetPos: Vec3 | null;
+  teamColor: number;
+  elapsed: number;
+}
+
+export interface IAimingGuide {
+  group: THREE.Group;
+  update(params: AimingGuideParams): void;
   dispose(): void;
 }
 

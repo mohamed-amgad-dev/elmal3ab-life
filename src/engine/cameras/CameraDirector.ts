@@ -19,6 +19,9 @@ export interface CameraDirectorContext {
   controlledPlayer: PlayerEntityState | null;
   humanTeam: TeamId;
   mouseLook: { yaw: number; pitch: number };
+  freeYaw: number;
+  freePitch: number;
+  isSprinting?: boolean;
   gkDiveState: GKDiveVisualState;
   benchSeatPos: Vec3;
   varFocusPos: Vec3;
@@ -57,10 +60,13 @@ export class CameraDirector {
   private readonly desiredLook = new THREE.Vector3();
   private readonly tmpForward = new THREE.Vector3();
   private readonly tmpRight = new THREE.Vector3();
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly ndcVec = new THREE.Vector2();
+  private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  private readonly rayHit = new THREE.Vector3();
 
   private currentFov = 52;
   private desiredFov = 52;
-  private thirdPersonYaw = 0;
   private gkRoll = 0;
   private initialized = false;
   private lastMode: CameraMode | 'menu_orbit' = 'menu_orbit';
@@ -146,43 +152,42 @@ export class CameraDirector {
       case 'player_third': {
         const player = ctx.controlledPlayer;
         if (player) {
-          const attackYaw = player.team === 'red' ? 0 : Math.PI;
-          const dxBall = ctx.ballPos.x - player.pos.x;
-          const dzBall = ctx.ballPos.z - player.pos.z;
-          const distBall = Math.hypot(dxBall, dzBall);
-          const ballYaw = distBall > 1.2 ? Math.atan2(dxBall, dzBall) : player.rotY;
+          // Rematch-style fast free-mouse 360 camera driven directly by freeYaw & freePitch
+          const aimYaw = ctx.freeYaw;
+          const aimPitch = clamp(ctx.freePitch, -0.22, 0.52);
 
-          // Blend player facing with ball/goal direction so spin moves don't whip the camera
-          const targetYaw =
-            player.animState === 'skill_spin' || player.animState === 'dive_flop'
-              ? attackYaw
-              : lerpAngle(player.rotY, distBall < 14 ? ballYaw : attackYaw, 0.38);
+          const dist = 9.0;
+          const height = 4.95 + aimPitch * 3.8;
+          // Over-the-shoulder offset reveals the player's feet, ball, and 3D aiming arrow cleanly
+          const shoulderRightX = Math.cos(aimYaw);
+          const shoulderRightZ = -Math.sin(aimYaw);
+          const shoulderOffset = 1.25;
 
-          if (!this.initialized || this.lastMode !== 'player_third') {
-            this.thirdPersonYaw = targetYaw;
-          } else {
-            this.thirdPersonYaw = lerpAngle(this.thirdPersonYaw, targetYaw, dampFactor(4.5, dt));
-          }
+          const rawCamX = player.pos.x - Math.sin(aimYaw) * dist + shoulderRightX * shoulderOffset;
+          const rawCamY = Math.max(1.8, player.pos.y + height);
+          const rawCamZ = player.pos.z - Math.cos(aimYaw) * dist + shoulderRightZ * shoulderOffset;
 
-          const dist = 10.2;
-          const height = 5.1;
+          // Keep camera strictly inside open stadium bowl so it never clips stands/roof
           this.desiredPos.set(
-            player.pos.x - Math.sin(this.thirdPersonYaw) * dist,
-            player.pos.y + height,
-            player.pos.z - Math.cos(this.thirdPersonYaw) * dist
+            clamp(rawCamX, -24.6, 24.6),
+            rawCamY,
+            clamp(rawCamZ, -34.6, 34.6)
           );
+
+          const lookAhead = 14.0;
+          const lookY = clamp(player.pos.y + 1.15 - aimPitch * 3.4, 0.25, 5.2);
           this.desiredLook.set(
-            player.pos.x + Math.sin(this.thirdPersonYaw) * 5.2 + (ctx.ballPos.x - player.pos.x) * 0.22,
-            player.pos.y + 1.45,
-            player.pos.z + Math.cos(this.thirdPersonYaw) * 5.2 + (ctx.ballPos.z - player.pos.z) * 0.22
+            player.pos.x + Math.sin(aimYaw) * lookAhead + shoulderRightX * 0.45,
+            lookY,
+            player.pos.z + Math.cos(aimYaw) * lookAhead + shoulderRightZ * 0.45
           );
         } else {
           this.desiredPos.set(ctx.ballPos.x, 12, ctx.ballPos.z - 16);
           this.desiredLook.set(ctx.ballPos.x, 1, ctx.ballPos.z);
         }
-        this.desiredFov = 58;
-        posLambda = 7.5;
-        lookLambda = 9.5;
+        this.desiredFov = ctx.isSprinting ? 64 : 60;
+        posLambda = 18.0;
+        lookLambda = 24.0;
         break;
       }
 
@@ -237,27 +242,25 @@ export class CameraDirector {
       case 'referee_cam': {
         const ref = ctx.controlledPlayer;
         if (ref) {
-          const dx = ctx.ballPos.x - ref.pos.x;
-          const dz = ctx.ballPos.z - ref.pos.z;
-          const toBallYaw = Math.hypot(dx, dz) > 0.8 ? Math.atan2(dx, dz) : ref.rotY;
-          const camYaw = lerpAngle(ref.rotY, toBallYaw, 0.55);
+          const camYaw = ctx.freeYaw;
+          const aimPitch = clamp(ctx.freePitch, -0.2, 0.48);
           this.desiredPos.set(
-            ref.pos.x - Math.sin(camYaw) * 8.4,
-            ref.pos.y + 4.3,
-            ref.pos.z - Math.cos(camYaw) * 8.4
+            clamp(ref.pos.x - Math.sin(camYaw) * 7.8, -24.6, 24.6),
+            Math.max(1.8, ref.pos.y + 3.8 + aimPitch * 3.6),
+            clamp(ref.pos.z - Math.cos(camYaw) * 7.8, -34.6, 34.6)
           );
           this.desiredLook.set(
-            ref.pos.x + (ctx.ballPos.x - ref.pos.x) * 0.48,
-            1.35,
-            ref.pos.z + (ctx.ballPos.z - ref.pos.z) * 0.48
+            ref.pos.x + Math.sin(camYaw) * 12.0,
+            clamp(ref.pos.y + 1.5 - aimPitch * 3.0, 0.4, 5.0),
+            ref.pos.z + Math.cos(camYaw) * 12.0
           );
         } else {
           this.desiredPos.set(ctx.ballPos.x - 10, 6, ctx.ballPos.z - 8);
           this.desiredLook.set(ctx.ballPos.x, 1.2, ctx.ballPos.z);
         }
-        this.desiredFov = 56;
-        posLambda = 7.0;
-        lookLambda = 9.0;
+        this.desiredFov = 58;
+        posLambda = 15.0;
+        lookLambda = 20.0;
         break;
       }
 
@@ -411,5 +414,17 @@ export class CameraDirector {
       forward: { x: this.tmpForward.x, y: 0, z: this.tmpForward.z },
       right: { x: this.tmpRight.x, y: 0, z: this.tmpRight.z },
     };
+  }
+
+  /**
+   * Raycasts screen NDC coordinates onto the pitch surface (Y = 0)
+   * so broadcast_top aiming follows the player's mouse cursor smoothly.
+   */
+  raycastGround(ndcX: number, ndcY: number): Vec3 | null {
+    this.ndcVec.set(ndcX, ndcY);
+    this.raycaster.setFromCamera(this.ndcVec, this.camera);
+    const hit = this.raycaster.ray.intersectPlane(this.groundPlane, this.rayHit);
+    if (!hit) return null;
+    return { x: hit.x, y: 0, z: hit.z };
   }
 }

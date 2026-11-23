@@ -36,14 +36,14 @@ export default function GoalkeeperHUD() {
 
         <div className="glass flex flex-wrap items-center justify-center gap-x-3 gap-y-1.5 rounded-2xl px-4 py-2.5">
           <span className="text-sm font-black text-white">
-            طير يمين/شمال: <span className="text-amber-300">Space + A/D</span> أو الماوس! — تشتيت: <span className="text-amber-300">E</span>
+            طير للتصدي: <span className="text-amber-300">كليك شمال / Space</span> (+ A/D) • تشتيت: <span className="text-amber-300">كليك يمين / E</span>
           </span>
         </div>
 
         <div className="flex flex-wrap items-center justify-center gap-1.5">
           <KeyPill k="A / D" label="يمين / شمال" />
-          <KeyPill k="Space" label="طيران" dim={!ready} />
-          <KeyPill k="E" label="تشتيت" />
+          <KeyPill k="كليك شمال / Space" label="طيران للتصدي" dim={!ready} />
+          <KeyPill k="كليك يمين / E" label="تشتيت" />
         </div>
       </div>
     </>

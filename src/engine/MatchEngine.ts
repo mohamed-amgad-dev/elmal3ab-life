@@ -9,6 +9,7 @@ import { OutfieldAI } from './ai/OutfieldAI';
 import { RefereeAI, type RefereeIncident } from './ai/RefereeAI';
 import { useGameStore } from '../store/useGameStore';
 import type {
+  IAimingGuide,
   IBallPhysics,
   ICharacterSystem,
   IEffectsManager,
@@ -28,6 +29,7 @@ import type {
   OutfieldPosition,
   PlayerEntityState,
   RoleType,
+  ShotPrecisionZone,
   TacticalStance,
   TeamId,
   VARState,
@@ -42,6 +44,8 @@ export interface MatchEngineDeps {
   effects: IEffectsManager;
   sound: ISoundEngine;
   camera: THREE.PerspectiveCamera;
+  domElement?: HTMLElement | null;
+  aimingGuide?: IAimingGuide;
   onRender?: () => void;
 }
 
@@ -60,6 +64,9 @@ interface EntityRuntime {
   slideDirVec: Vec3;
   slideTimer: number;
   jukeImmuneTimer: number;
+  knockbackVx: number;
+  knockbackVz: number;
+  knockbackTimer: number;
   benchSlotIndex: number;
   // Match stats for Full-Time Comedy Awards
   goals: number;
@@ -146,6 +153,7 @@ export class MatchEngine implements IMatchEngine {
   private readonly effects: IEffectsManager;
   private readonly sound: ISoundEngine;
   private readonly camera: THREE.PerspectiveCamera;
+  private readonly aimingGuide?: IAimingGuide;
   private readonly onRender?: () => void;
 
   private readonly cameraDirector: CameraDirector;
@@ -185,9 +193,11 @@ export class MatchEngine implements IMatchEngine {
   private gkCatchHoldTimer = 0;
   private gkSaveGraceTimer = 0;
 
-  // Human shot charge & direct move override
+  // Human shot charge, precision aiming & direct move override
   private isChargingShot = false;
   private shotCharge = 0;
+  private aimCurl = 0;
+  private humanAimDir: Vec3 = { x: 0, y: 0, z: 1 };
   private externalMoveVec: { dx: number; dz: number } | null = null;
   private externalSprint = false;
 
@@ -208,10 +218,12 @@ export class MatchEngine implements IMatchEngine {
     this.effects = deps.effects;
     this.sound = deps.sound;
     this.camera = deps.camera;
+    this.aimingGuide = deps.aimingGuide;
     this.onRender = deps.onRender;
 
     this.cameraDirector = new CameraDirector(this.camera);
     this.inputManager = new InputManager({
+      domElement: deps.domElement,
       onUserGesture: () => this.sound.unlock(),
     });
 
@@ -246,6 +258,9 @@ export class MatchEngine implements IMatchEngine {
       this.isPaused = false;
     } else {
       this.isPaused = paused;
+      if (paused) {
+        this.inputManager.exitPointerLock();
+      }
     }
     this.syncStoreImmediate();
   }
@@ -281,9 +296,22 @@ export class MatchEngine implements IMatchEngine {
         this.stadium.setVARActive(false);
         this.ball.setFrozen(false);
         this.ball.setTrajectoryVisible(false);
+        this.aimingGuide?.update({
+          visible: false,
+          playerPos: { x: 0, y: 0, z: 0 },
+          aimDir: { x: 0, y: 0, z: 1 },
+          charge: 0,
+          curl: 0,
+          isCharging: false,
+          ballPos: { x: 0, y: 0, z: 0 },
+          passTargetPos: null,
+          teamColor: 0xe62e3d,
+          elapsed: this.elapsed,
+        });
+        this.inputManager.exitPointerLock();
         this.phase = 'lobby';
         this.positionForKickoff();
-        this.ball.reset({ x: 0, y: 0.22, z: 0 });
+        this.ball.reset({ x: 0, y: 0.42, z: 0 });
         this.syncStoreImmediate();
         break;
 
@@ -331,6 +359,7 @@ export class MatchEngine implements IMatchEngine {
         ) {
           this.isChargingShot = true;
           this.shotCharge = 0.08;
+          this.aimCurl = 0;
         }
         break;
 
@@ -339,6 +368,7 @@ export class MatchEngine implements IMatchEngine {
           this.handleHumanShootRelease();
           this.isChargingShot = false;
           this.shotCharge = 0;
+          this.aimCurl = 0;
         }
         break;
 
@@ -460,11 +490,16 @@ export class MatchEngine implements IMatchEngine {
       this.phase = store.phase;
     }
 
-    if (this.isPaused) {
-      // Keep stadium lights/camera alive gently without advancing match clock or physics
-      this.stadium.update(dt * 0.25, this.elapsed);
-      this.updateCameraAndVisuals(dt);
-      return;
+    if (this.isPaused || store.isControlsOpen) {
+      if (this.inputManager.isPointerLocked()) {
+        this.inputManager.exitPointerLock();
+      }
+      if (this.isPaused) {
+        // Keep stadium lights/camera alive gently without advancing match clock or physics
+        this.stadium.update(dt * 0.25, this.elapsed);
+        this.updateCameraAndVisuals(dt);
+        return;
+      }
     }
 
     this.elapsed += dt;
@@ -484,6 +519,7 @@ export class MatchEngine implements IMatchEngine {
 
     if (this.phase === 'menu' || this.phase === 'lobby' || this.phase === 'full_time') {
       this.ball.setTrajectoryVisible(false);
+      this.hideAimingGuide();
       this.characters.syncPlayers(
         this.entities.map((e) => e.entity),
         dt,
@@ -543,9 +579,10 @@ export class MatchEngine implements IMatchEngine {
       this.stepPenaltySetup(dt);
     }
 
-    // 2. Charge human shot if holding E/RMB
+    // 2. Charge human shot & update live free-mouse aim direction + curl spin
+    this.updateHumanAimAndCurl(dt);
     if (this.isChargingShot) {
-      this.shotCharge = Math.min(1, this.shotCharge + dt * 1.25);
+      this.shotCharge = Math.min(1, this.shotCharge + dt * 1.05);
     }
 
     // 3. Cooldowns on every entity
@@ -600,6 +637,9 @@ export class MatchEngine implements IMatchEngine {
     // Clear pending referee incident after referee evaluated it this tick
     this.pendingIncident = null;
 
+    // 4b. Apply physical knockback momentum & player-vs-player body contact separation
+    this.stepKnockbackAndBodyCollisions(dt);
+
     // 5. Update ball physics + possession + GK catches/saves + goal detection
     this.stepBallAndInteractions(dt);
 
@@ -620,8 +660,9 @@ export class MatchEngine implements IMatchEngine {
       );
     }
 
-    // 8. Sync 3D characters, particles, trajectory line, and camera
+    // 8. Sync 3D characters, particles, aiming guide, trajectory line, and camera
     this.updateBallTrajectoryGuide();
+    this.updateAimingGuideVisual();
     this.characters.syncPlayers(
       this.entities.map((e) => e.entity),
       dt,
@@ -709,6 +750,8 @@ export class MatchEngine implements IMatchEngine {
     }
 
     // Drive dramatic VAR replay camera
+    const freeLook = this.inputManager.getFreeLook();
+    this.hideAimingGuide();
     this.cameraDirector.update(dt, this.elapsed, {
       phase: 'var_review',
       cameraMode: 'var_replay_cam',
@@ -718,6 +761,9 @@ export class MatchEngine implements IMatchEngine {
       controlledPlayer: this.getControlledRuntime()?.entity ?? null,
       humanTeam: this.humanSlot.team,
       mouseLook: this.inputManager.getMouseLook(),
+      freeYaw: freeLook.yaw,
+      freePitch: freeLook.pitch,
+      isSprinting: false,
       gkDiveState: 'none',
       benchSeatPos: this.getHumanBenchSeatPos(),
       varFocusPos: focusPos,
@@ -753,6 +799,11 @@ export class MatchEngine implements IMatchEngine {
 
     if (!canMove) {
       if (rt.animLockTimer <= 0) p.animState = 'idle';
+      return;
+    }
+
+    // Active physical knockback launch from slide-tackle collision
+    if (rt.knockbackTimer > 0) {
       return;
     }
 
@@ -794,9 +845,12 @@ export class MatchEngine implements IMatchEngine {
       rt.vx = worldX * speed;
       rt.vz = worldZ * speed;
 
-      if (moving) {
+      if (moving && !this.isChargingShot) {
         const targetYaw = Math.atan2(worldX, worldZ);
         p.rotY = lerpAngle(p.rotY, targetYaw, 1 - Math.exp(-14 * dt));
+      } else if (this.activeCamera === 'player_third' || this.isChargingShot) {
+        const aimYaw = Math.atan2(this.humanAimDir.x, this.humanAimDir.z);
+        p.rotY = lerpAngle(p.rotY, aimYaw, 1 - Math.exp(-16 * dt));
       }
 
       // Stamina drain/regen
@@ -1196,7 +1250,24 @@ export class MatchEngine implements IMatchEngine {
       }
     }
 
-    // 2. Step ball physics
+    // 2. Sync solid player capsule colliders into Rapier3D, then step ball physics
+    if (this.ball.syncPlayerColliders) {
+      this.ball.syncPlayerColliders(
+        this.entities.map((rt) => ({
+          id: rt.entity.id,
+          pos: rt.entity.pos,
+          vx: rt.vx,
+          vz: rt.vz,
+          active:
+            (rt.entity.role === 'outfield' || rt.entity.role === 'goalkeeper') &&
+            !rt.entity.isBenched &&
+            !rt.entity.isSentOff,
+          isKickerCooldown:
+            rt.kickCooldown > 0 || this.possessorId === rt.entity.id,
+        }))
+      );
+    }
+
     const tick = this.ball.update(dt, config);
     const ballPos = this.ball.state.pos;
     const ballSpeed = tick.speed;
@@ -1285,17 +1356,26 @@ export class MatchEngine implements IMatchEngine {
       this.possessorId = closestCarrier.entity.id;
       const p = closestCarrier.entity;
       const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
+      const leadX = p.isHumanControlled ? this.humanAimDir.x : Math.sin(p.rotY);
+      const leadZ = p.isHumanControlled ? this.humanAimDir.z : Math.cos(p.rotY);
       const dribbleAnchor: Vec3 = {
-        x: p.pos.x + Math.sin(p.rotY) * 0.88,
-        y: 0.22,
-        z: p.pos.z + Math.cos(p.rotY) * 0.88,
+        x: p.pos.x + leadX * 0.98,
+        y: 0.42,
+        z: p.pos.z + leadZ * 0.98,
       };
       const toAnchorX = dribbleAnchor.x - ballPos.x;
       const toAnchorZ = dribbleAnchor.z - ballPos.z;
       const toAnchorDist = Math.hypot(toAnchorX, toAnchorZ);
       const playerSpeed = Math.hypot(closestCarrier.vx, closestCarrier.vz);
 
-      if (toAnchorDist > 0.14 || playerSpeed > 0.5) {
+      if (this.ball.applyDribbleVelocity) {
+        const targetVel: Vec3 = {
+          x: clamp(toAnchorX * 8.5 + closestCarrier.vx, -16, 16),
+          y: 0,
+          z: clamp(toAnchorZ * 8.5 + closestCarrier.vz, -16, 16),
+        };
+        this.ball.applyDribbleVelocity(targetVel, p.id, team);
+      } else if (toAnchorDist > 0.14 || playerSpeed > 0.5) {
         const dir = normalizeXZ(
           toAnchorX * 4.5 + closestCarrier.vx,
           toAnchorZ * 4.5 + closestCarrier.vz
@@ -1433,46 +1513,26 @@ export class MatchEngine implements IMatchEngine {
     const dBall = distXZ(p.pos, this.ball.state.pos);
 
     if (this.phase === 'penalty_setup' && this.penaltyCtx?.shooterId === p.id) {
-      const dir = { x: Math.sin(p.rotY), y: 0, z: Math.cos(p.rotY) };
-      this.performKick(rt, dir, 24, 0.18, false);
+      const dir = normalizeXZ(this.humanAimDir.x, this.humanAimDir.z);
+      this.performKick(rt, dir, 24, 3.6, false);
       this.phase = 'playing';
       this.penaltyCtx = null;
       this.syncStoreImmediate();
       return;
     }
 
-    // If close to ball -> Pass to best teammate!
-    if (dBall < 2.55 && this.ball.state.pos.y < 1.8) {
-      const facing = { x: Math.sin(p.rotY), y: 0, z: Math.cos(p.rotY) };
-      const teammates = this.entities.filter(
-        (e) =>
-          e.entity.id !== p.id &&
-          e.entity.team === team &&
-          e.entity.role === 'outfield' &&
-          !e.entity.isBenched &&
-          !e.entity.isSentOff
-      );
-
-      let bestTarget: EntityRuntime | null = null;
-      let bestScore = -Infinity;
-      for (const tm of teammates) {
-        const toTm = normalizeXZ(tm.entity.pos.x - p.pos.x, tm.entity.pos.z - p.pos.z);
-        const alignment = toTm.x * facing.x + toTm.z * facing.z;
-        const dist = distXZ(p.pos, tm.entity.pos);
-        const score = alignment * 12 - dist * 0.2;
-        if (score > bestScore) {
-          bestScore = score;
-          bestTarget = tm;
-        }
-      }
+    // If close to ball -> Aimed Pass strictly along humanAimDir (snapping onto teammate inside ±20° cone)
+    if (dBall < 2.65 && this.ball.state.pos.y < 1.9) {
+      const aim = normalizeXZ(this.humanAimDir.x, this.humanAimDir.z);
+      const bestTarget = this.findAimedPassTarget(rt, aim);
 
       const passDir = bestTarget
         ? normalizeXZ(bestTarget.entity.pos.x - p.pos.x, bestTarget.entity.pos.z - p.pos.z)
-        : facing;
-      const dist = bestTarget ? distXZ(p.pos, bestTarget.entity.pos) : 12;
-      const power = clamp(13 + dist * 0.52, 15, 23);
+        : aim;
+      const dist = bestTarget ? distXZ(p.pos, bestTarget.entity.pos) : 14;
+      const power = clamp(14 + dist * 0.52, 16, 24);
 
-      this.performKick(rt, passDir, power, 0.06, false);
+      this.performKick(rt, passDir, power, 1.4, false);
 
       // PES auto-switch to pass receiver when team_switch is active!
       const rules = useGameStore.getState().rules;
@@ -1496,7 +1556,7 @@ export class MatchEngine implements IMatchEngine {
 
     if (distXZ(p.pos, this.ball.state.pos) < 2.2) {
       this.possessorId = null;
-      this.ball.kick(toBall, 11, 0.05, false, p.id, team);
+      this.ball.kick(toBall, 11, 1.1, false, p.id, team);
       this.sound.playKick(0.45);
       rt.tackles += 1;
     }
@@ -1508,28 +1568,29 @@ export class MatchEngine implements IMatchEngine {
     if (this.phase !== 'playing' && this.phase !== 'penalty_setup') return;
 
     const p = rt.entity;
-    const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
     const dBall = distXZ(p.pos, this.ball.state.pos);
-    if (dBall > 2.85 && this.phase !== 'penalty_setup') return;
+    if (dBall > 2.95 && this.phase !== 'penalty_setup') return;
 
-    const targetGoalZ =
-      team === 'red' ? this.stadium.config.halfLength : -this.stadium.config.halfLength;
-    const facing = { x: Math.sin(p.rotY), y: 0, z: Math.cos(p.rotY) };
-    const toGoal = normalizeXZ(0 - p.pos.x, targetGoalZ - p.pos.z);
+    // Fire strictly along the 3D aiming arrow direction (`humanAimDir`)!
+    const dir = normalizeXZ(this.humanAimDir.x, this.humanAimDir.z);
+    const zone = this.computePrecisionZone(this.shotCharge, true);
+    const isSweet = zone === 'perfect';
+    const isOver = zone === 'overcharge';
 
-    // Subtle arcade goal assist when generally facing opponent goal
-    const alignmentWithGoal = facing.x * toGoal.x + facing.z * toGoal.z;
-    const blend = alignmentWithGoal > 0.25 ? 0.36 : 0;
-    const dir = normalizeXZ(
-      facing.x * (1 - blend) + toGoal.x * blend,
-      facing.z * (1 - blend) + toGoal.z * blend
-    );
+    const speedMult = isSweet ? 1.22 : 1.0;
+    const power = (18 + this.shotCharge * 18) * speedMult;
+    const liftVel = 3.2 + this.shotCharge * 5.8 + (isOver ? 5.2 : 0);
+    const curlSpinY = (isSweet ? 22 : 14) * this.aimCurl;
+    const isSuperShot = isSweet || this.shotCharge >= 0.78;
 
-    const power = 18 + this.shotCharge * 18;
-    const lift = 0.14 + this.shotCharge * 0.34;
-    const isSuperShot = this.shotCharge >= 0.78;
+    this.performKickWithSpin(rt, dir, power, liftVel, curlSpinY, isSuperShot);
 
-    this.performKick(rt, dir, power, lift, isSuperShot);
+    if (isSweet) {
+      this.effects.spawnBurst(this.ball.state.pos, 0x34d399, 24, 5.2);
+      this.pushEvent('تسديدة في المقص! دقة مثالية 🎯🔥', '🎯', 'crowd');
+    } else if (isOver) {
+      this.pushEvent('شاطها في المدرجات! خفّ إيدك شوية 😂🚀', '🚀', 'crowd');
+    }
 
     if (this.phase === 'penalty_setup') {
       this.phase = 'playing';
@@ -1678,8 +1739,22 @@ export class MatchEngine implements IMatchEngine {
             : 'coach_touchline';
     }
 
+    const prevCam = this.activeCamera;
     this.activeCamera = nextCam;
     this.humanSlot.cameraMode = nextCam;
+    if (nextCam === 'player_third' && prevCam !== 'player_third') {
+      const rt = this.getControlledRuntime();
+      if (rt) {
+        this.inputManager.setFreeYaw(rt.entity.rotY);
+      }
+    }
+    if (
+      nextCam !== 'player_third' &&
+      nextCam !== 'gk_first_person' &&
+      nextCam !== 'referee_cam'
+    ) {
+      this.inputManager.exitPointerLock();
+    }
     this.syncStoreImmediate();
   }
 
@@ -1812,6 +1887,7 @@ export class MatchEngine implements IMatchEngine {
       this.humanSlot.isBenched = true;
       this.activeCamera = 'bench_cam';
       this.humanSlot.cameraMode = 'bench_cam';
+      this.inputManager.exitPointerLock();
       this.cameraDirector.snapNextFrame();
     }
 
@@ -1934,6 +2010,7 @@ export class MatchEngine implements IMatchEngine {
         cameraMode: 'bench_cam',
       };
       this.activeCamera = 'bench_cam';
+      this.inputManager.exitPointerLock();
       if (target) {
         target.entity.isHumanControlled = true;
         this.controlledPlayerId = target.entity.id;
@@ -1966,6 +2043,7 @@ export class MatchEngine implements IMatchEngine {
         this.controlledPlayerId = target.entity.id;
       }
       this.activeCamera = this.resolveAllowedOutfieldCamera(rules);
+      this.inputManager.setFreeYaw(team === 'red' ? 0 : Math.PI);
       this.pushEvent('بدّلت لدور لاعب الملعب! ورّينا المهارة ⚽🔥', '⚽', 'tactic');
     } else if (role === 'goalkeeper') {
       const gk = this.entities.find(
@@ -1985,6 +2063,7 @@ export class MatchEngine implements IMatchEngine {
       if (ref) {
         ref.entity.isHumanControlled = true;
         this.controlledPlayerId = ref.entity.id;
+        this.inputManager.setFreeYaw(ref.entity.rotY);
       }
       this.activeCamera = 'referee_cam';
       this.sound.playWhistle('short');
@@ -1998,10 +2077,12 @@ export class MatchEngine implements IMatchEngine {
         this.controlledPlayerId = coach.entity.id;
       }
       this.activeCamera = 'coach_touchline';
+      this.inputManager.exitPointerLock();
       this.pushEvent('بقيت المدير الفني! ظبط التكتيك والدكة 🧥📢', '🧥', 'tactic');
     } else {
       this.controlledPlayerId = null;
       this.activeCamera = 'stands_cam';
+      this.inputManager.exitPointerLock();
       this.pushEvent('طلعت المدرجات تتفرج وتشجع! 🏟️🎉', '🏟️', 'crowd');
     }
 
@@ -2033,6 +2114,37 @@ export class MatchEngine implements IMatchEngine {
       this.cameraDirector.triggerShake(0.28, 0.22);
       this.sound.playCrowdReaction('ooh');
       this.pushEvent(`صاروخية من ${p.name}!! 🔥🚀`, '🚀', 'crowd');
+    }
+  }
+
+  private performKickWithSpin(
+    rt: EntityRuntime,
+    dir: Vec3,
+    power: number,
+    lift: number,
+    curlSpinY: number,
+    isSuperShot: boolean
+  ): void {
+    const p = rt.entity;
+    const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
+    const norm = normalizeXZ(dir.x, dir.z);
+
+    if (this.ball.kickWithSpin) {
+      this.ball.kickWithSpin(norm, power, lift, curlSpinY, isSuperShot, p.id, team);
+    } else {
+      this.ball.kick(norm, power, lift, isSuperShot, p.id, team);
+    }
+    this.possessorId = null;
+    rt.kickCooldown = 0.28;
+    p.animState = 'kick';
+    rt.animLockTimer = 0.34;
+    p.rotY = Math.atan2(norm.x, norm.z);
+
+    this.sound.playKick(clamp(power / 34, 0.25, 1));
+    if (isSuperShot) {
+      this.effects.spawnBurst(this.ball.state.pos, 0xff5500, 20, 4.5);
+      this.cameraDirector.triggerShake(0.32, 0.24);
+      this.sound.playCrowdReaction('ooh');
     }
   }
 
@@ -2088,6 +2200,9 @@ export class MatchEngine implements IMatchEngine {
       if (distXZ(tp.pos, op.pos) < 1.3) {
         op.animState = 'dive_flop';
         other.animLockTimer = 0.85;
+        other.knockbackVx = tackler.slideDirVec.x * 11.5;
+        other.knockbackVz = tackler.slideDirVec.z * 11.5;
+        other.knockbackTimer = 0.42;
         this.effects.spawnDiveStars(op.pos);
         this.cameraDirector.triggerShake(0.22, 0.2);
         tackler.tackles += 1;
@@ -2353,6 +2468,8 @@ export class MatchEngine implements IMatchEngine {
     this.ball.setFrozen(true);
     this.stadium.setVARActive(true);
     this.sound.playVARChime();
+    this.inputManager.exitPointerLock();
+    this.hideAimingGuide();
 
     const refRt = this.entities.find((e) => e.entity.role === 'referee');
     if (refRt) {
@@ -2506,12 +2623,14 @@ export class MatchEngine implements IMatchEngine {
     this.activeCamera = incomingSlot.cameraMode;
     this.cameraDirector.snapNextFrame();
     this.inputManager.resetMouseLook();
+    this.inputManager.setFreeYaw(incomingSlot.team === 'red' ? 0 : Math.PI);
+    this.aimCurl = 0;
 
     store.resetMatchStats();
     this.spawnRoster(rules);
     this.assignInitialHumanEntity();
     this.positionForKickoff();
-    this.ball.reset({ x: 0, y: 0.22, z: 0 });
+    this.ball.reset({ x: 0, y: 0.42, z: 0 });
 
     this.phase = 'kickoff';
     this.kickoffTimer = 1.1;
@@ -2524,6 +2643,9 @@ export class MatchEngine implements IMatchEngine {
     this.phase = 'full_time';
     this.isChargingShot = false;
     this.shotCharge = 0;
+    this.aimCurl = 0;
+    this.inputManager.exitPointerLock();
+    this.hideAimingGuide();
     this.ball.setTrajectoryVisible(false);
     this.sound.playWhistle('long');
     this.sound.playGoalCelebration();
@@ -2611,6 +2733,9 @@ export class MatchEngine implements IMatchEngine {
       slideDirVec: { x: 0, y: 0, z: 1 },
       slideTimer: 0,
       jukeImmuneTimer: 0,
+      knockbackVx: 0,
+      knockbackVz: 0,
+      knockbackTimer: 0,
       benchSlotIndex,
       goals: 0,
       saves: 0,
@@ -2871,6 +2996,10 @@ export class MatchEngine implements IMatchEngine {
           ? 'catch'
           : controlledRt.gkDiveState
         : 'none';
+    const freeLook = this.inputManager.getFreeLook();
+    const sprinting =
+      (this.inputManager.isSprinting() || this.externalSprint) &&
+      (controlledRt ? controlledRt.entity.stamina > 4 : false);
 
     const camOut = this.cameraDirector.update(dt, this.elapsed, {
       phase: this.phase,
@@ -2881,6 +3010,9 @@ export class MatchEngine implements IMatchEngine {
       controlledPlayer: controlledRt?.entity ?? null,
       humanTeam: this.humanSlot.team,
       mouseLook: this.inputManager.getMouseLook(),
+      freeYaw: freeLook.yaw,
+      freePitch: freeLook.pitch,
+      isSprinting: sprinting,
       gkDiveState,
       benchSeatPos: this.getHumanBenchSeatPos(),
       varFocusPos: this.varCtx?.focusPos ?? this.ball.state.pos,
@@ -2948,7 +3080,175 @@ export class MatchEngine implements IMatchEngine {
     if (rules.allowedCameras === 'top_only') return 'broadcast_top';
     if (rules.allowedCameras === 'player_only') return 'player_third';
     if (preferred === 'player_third' || preferred === 'broadcast_top') return preferred;
-    return 'broadcast_top';
+    return 'player_third';
+  }
+
+  private computePrecisionZone(charge: number, charging: boolean): ShotPrecisionZone {
+    if (!charging) return 'none';
+    if (charge < 0.35) return 'low';
+    if (charge < 0.72) return 'good';
+    if (charge <= 0.88) return 'perfect';
+    return 'overcharge';
+  }
+
+  private updateHumanAimAndCurl(dt: number): void {
+    const rt = this.getControlledRuntime();
+    if (!rt) return;
+
+    if (this.activeCamera === 'broadcast_top') {
+      const ndc = this.inputManager.getMouseNDC();
+      const groundHit = this.cameraDirector.raycastGround(ndc.x, ndc.y);
+      if (groundHit) {
+        const dx = groundHit.x - rt.entity.pos.x;
+        const dz = groundHit.z - rt.entity.pos.z;
+        if (Math.hypot(dx, dz) > 0.35) {
+          this.humanAimDir = normalizeXZ(dx, dz);
+        }
+      }
+    } else {
+      const { yaw } = this.inputManager.getFreeLook();
+      this.humanAimDir = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+    }
+
+    if (this.isChargingShot) {
+      const curlDelta = this.inputManager.consumeCurlDelta();
+      const rawMove = this.getHumanMoveInput();
+      const kbSteer = this.activeCamera === 'player_third' ? rawMove.dx * dt * 1.15 : 0;
+      this.aimCurl = clamp(this.aimCurl + curlDelta + kbSteer, -1, 1);
+    } else {
+      this.aimCurl = 0;
+    }
+  }
+
+  private stepKnockbackAndBodyCollisions(dt: number): void {
+    const decay = Math.exp(-5.2 * dt);
+    const activeBodies: EntityRuntime[] = [];
+
+    for (const rt of this.entities) {
+      if (rt.knockbackTimer > 0) {
+        rt.knockbackTimer = Math.max(0, rt.knockbackTimer - dt);
+        rt.entity.pos.x += rt.knockbackVx * dt;
+        rt.entity.pos.z += rt.knockbackVz * dt;
+        rt.knockbackVx *= decay;
+        rt.knockbackVz *= decay;
+      }
+
+      if (
+        (rt.entity.role === 'outfield' || rt.entity.role === 'goalkeeper') &&
+        !rt.entity.isBenched &&
+        !rt.entity.isSentOff
+      ) {
+        activeBodies.push(rt);
+      }
+    }
+
+    // Physical player-vs-player body contact separation
+    const minSep = 0.94;
+    for (let i = 0; i < activeBodies.length; i++) {
+      const a = activeBodies[i];
+      for (let j = i + 1; j < activeBodies.length; j++) {
+        const b = activeBodies[j];
+        const dx = b.entity.pos.x - a.entity.pos.x;
+        const dz = b.entity.pos.z - a.entity.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 0.001 && d < minSep) {
+          const push = (minSep - d) * 0.5;
+          const nx = dx / d;
+          const nz = dz / d;
+          if (a.entity.role !== 'goalkeeper') {
+            a.entity.pos.x -= nx * push;
+            a.entity.pos.z -= nz * push;
+          }
+          if (b.entity.role !== 'goalkeeper') {
+            b.entity.pos.x += nx * push;
+            b.entity.pos.z += nz * push;
+          }
+        }
+      }
+    }
+  }
+
+  private findAimedPassTarget(
+    passer: EntityRuntime,
+    aimDir: Vec3
+  ): EntityRuntime | null {
+    const p = passer.entity;
+    const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
+    const teammates = this.entities.filter(
+      (e) =>
+        e.entity.id !== p.id &&
+        e.entity.team === team &&
+        e.entity.role === 'outfield' &&
+        !e.entity.isBenched &&
+        !e.entity.isSentOff
+    );
+
+    const minConeCos = Math.cos((24 * Math.PI) / 180); // ±24° cone
+    let bestTarget: EntityRuntime | null = null;
+    let bestScore = -Infinity;
+    for (const tm of teammates) {
+      const toTm = normalizeXZ(tm.entity.pos.x - p.pos.x, tm.entity.pos.z - p.pos.z);
+      const dot = toTm.x * aimDir.x + toTm.z * aimDir.z;
+      if (dot < minConeCos) continue;
+      const dist = distXZ(p.pos, tm.entity.pos);
+      const score = dot * 18 - dist * 0.16;
+      if (score > bestScore) {
+        bestScore = score;
+        bestTarget = tm;
+      }
+    }
+    return bestTarget;
+  }
+
+  private hideAimingGuide(): void {
+    this.aimingGuide?.update({
+      visible: false,
+      playerPos: { x: 0, y: 0, z: 0 },
+      aimDir: { x: 0, y: 0, z: 1 },
+      charge: 0,
+      curl: 0,
+      isCharging: false,
+      ballPos: this.ball.state.pos,
+      passTargetPos: null,
+      teamColor: 0x00e5ff,
+      elapsed: this.elapsed,
+    });
+  }
+
+  private updateAimingGuideVisual(): void {
+    if (!this.aimingGuide) return;
+    const rt = this.getControlledRuntime();
+    const show =
+      Boolean(rt) &&
+      this.humanSlot.role === 'outfield' &&
+      !this.humanSlot.isBenched &&
+      (this.phase === 'playing' || this.phase === 'penalty_setup' || this.phase === 'kickoff');
+
+    if (!show || !rt) {
+      this.hideAimingGuide();
+      return;
+    }
+
+    const aim = normalizeXZ(this.humanAimDir.x, this.humanAimDir.z);
+    const hasBallNearby = distXZ(rt.entity.pos, this.ball.state.pos) < 2.8;
+    const passTarget = hasBallNearby ? this.findAimedPassTarget(rt, aim) : null;
+    const teamColor =
+      rt.entity.team === 'blue'
+        ? this.stadium.config.colors.blueTeam
+        : this.stadium.config.colors.redTeam;
+
+    this.aimingGuide.update({
+      visible: true,
+      playerPos: rt.entity.pos,
+      aimDir: aim,
+      charge: this.shotCharge,
+      curl: this.aimCurl,
+      isCharging: this.isChargingShot,
+      ballPos: this.ball.state.pos,
+      passTargetPos: passTarget ? passTarget.entity.pos : null,
+      teamColor,
+      elapsed: this.elapsed,
+    });
   }
 
   private isInsideDefendingPenaltyBox(pos: Vec3, defendingTeam: TeamId): boolean {
@@ -3002,6 +3302,10 @@ export class MatchEngine implements IMatchEngine {
       controlledPlayerId: this.controlledPlayerId,
       nearestRefTargetId: this.nearestRefTargetId,
       shotCharge: this.shotCharge,
+      aimPrecisionZone: this.computePrecisionZone(this.shotCharge, this.isChargingShot),
+      aimCurl: this.aimCurl,
+      pointerLocked: this.inputManager.isPointerLocked(),
+      physicsBackend: this.ball.isRapierReady?.() ? 'rapier3d' : 'fallback',
       stamina: controlledRt ? controlledRt.entity.stamina : 100,
       skillCooldown: controlledRt ? controlledRt.skillCooldown : 0,
       diveCooldown: controlledRt ? controlledRt.diveCooldown : 0,

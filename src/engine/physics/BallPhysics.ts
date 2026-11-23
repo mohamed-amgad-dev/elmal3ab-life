@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { BallTickResult, IBallPhysics } from '../../types/engine';
 import type { BallStateSnapshot, TeamId, Vec3 } from '../../types/game';
 import type { StadiumConfig } from '../../types/stadium';
+import type { PlayerColliderInput, RapierPhysicsWorld } from './RapierWorld';
 
 const BALL_RADIUS = 0.42;
 const GRAVITY = 26.0;
@@ -144,6 +145,7 @@ export class BallPhysics implements IBallPhysics {
 
   private readonly disposables: Array<{ dispose: () => void }> = [];
 
+  private rapierWorld: RapierPhysicsWorld | null = null;
   private frozen = false;
   private scoredInsideNet: TeamId | null = null;
   private trajectoryVisible = false;
@@ -263,6 +265,43 @@ export class BallPhysics implements IBallPhysics {
     return item;
   }
 
+  public attachRapier(world: RapierPhysicsWorld): void {
+    this.rapierWorld = world;
+    const body = world.ballBody;
+    body.setTranslation(
+      {
+        x: this.state.pos.x,
+        y: Math.max(BALL_RADIUS, this.state.pos.y),
+        z: this.state.pos.z,
+      },
+      true
+    );
+    body.setLinvel(
+      {
+        x: this.state.vel.x,
+        y: this.state.vel.y,
+        z: this.state.vel.z,
+      },
+      true
+    );
+    body.setAngvel(
+      {
+        x: this.state.spin.x,
+        y: this.state.spin.y,
+        z: this.state.spin.z,
+      },
+      true
+    );
+  }
+
+  public isRapierReady(): boolean {
+    return this.rapierWorld !== null;
+  }
+
+  public syncPlayerColliders(players: PlayerColliderInput[]): void {
+    this.rapierWorld?.syncPlayerColliders(players);
+  }
+
   public reset(pos?: Vec3): void {
     const rx = pos ? pos.x : 0;
     const ry = pos ? Math.max(BALL_RADIUS, pos.y) : BALL_RADIUS;
@@ -283,6 +322,14 @@ export class BallPhysics implements IBallPhysics {
     this.scoredInsideNet = null;
     this.frozen = false;
 
+    if (this.rapierWorld) {
+      const b = this.rapierWorld.ballBody;
+      b.setTranslation({ x: rx, y: ry, z: rz }, true);
+      b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      b.resetForces(true);
+    }
+
     this.ballSphere.quaternion.identity();
     this.syncVisualMesh();
   }
@@ -297,20 +344,48 @@ export class BallPhysics implements IBallPhysics {
   ): void {
     const len = Math.hypot(dir.x, dir.y, dir.z);
     const nx = len > 1e-5 ? dir.x / len : 0;
+    const curveSign = nx >= 0 ? 1 : -1;
+    const defaultCurl = isSuperShot
+      ? curveSign * Math.min(18, power * 0.42)
+      : curveSign * Math.min(8, Math.abs(nx) * power * 0.25);
+
+    this.kickWithSpin(dir, power, lift, defaultCurl, isSuperShot, byPlayerId, byTeam);
+  }
+
+  public kickWithSpin(
+    dir: Vec3,
+    power: number,
+    lift: number,
+    curlSpinY: number,
+    isSuperShot: boolean,
+    byPlayerId?: string,
+    byTeam?: TeamId
+  ): void {
+    const len = Math.hypot(dir.x, dir.y, dir.z);
+    const nx = len > 1e-5 ? dir.x / len : 0;
     const ny = len > 1e-5 ? dir.y / len : 0;
     const nz = len > 1e-5 ? dir.z / len : 1;
 
-    this.state.vel.x = nx * power;
-    this.state.vel.y = Math.max(0, ny * power + lift);
-    this.state.vel.z = nz * power;
+    const vx = nx * power;
+    const vy = Math.max(0, ny * power + lift);
+    const vz = nz * power;
+    const sx = nz * (isSuperShot ? -9 : -3.5);
+    const sy = curlSpinY;
+    const sz = -nx * (isSuperShot ? -9 : -3.5);
 
-    // Add lively arcade curve spin for angled/super shots
-    const curveSign = nx >= 0 ? 1 : -1;
-    this.state.spin.y = isSuperShot
-      ? curveSign * Math.min(18, power * 0.42)
-      : curveSign * Math.min(8, Math.abs(nx) * power * 0.25);
-    this.state.spin.x = nz * (isSuperShot ? -8 : -3);
-    this.state.spin.z = -nx * (isSuperShot ? -8 : -3);
+    this.state.vel.x = vx;
+    this.state.vel.y = vy;
+    this.state.vel.z = vz;
+    this.state.spin.x = sx;
+    this.state.spin.y = sy;
+    this.state.spin.z = sz;
+
+    if (this.rapierWorld) {
+      const b = this.rapierWorld.ballBody;
+      b.wakeUp();
+      b.setLinvel({ x: vx, y: vy, z: vz }, true);
+      b.setAngvel({ x: sx, y: sy, z: sz }, true);
+    }
 
     this.state.isSuperShot = isSuperShot;
     if (byPlayerId !== undefined) {
@@ -322,9 +397,38 @@ export class BallPhysics implements IBallPhysics {
     this.frozen = false;
   }
 
+  public applyDribbleVelocity(
+    targetVel: Vec3,
+    byPlayerId: string,
+    byTeam: TeamId
+  ): void {
+    this.state.lastTouchPlayerId = byPlayerId;
+    this.state.lastTouchTeam = byTeam;
+    this.state.isSuperShot = false;
+    this.frozen = false;
+
+    const rollAngX = targetVel.z / BALL_RADIUS;
+    const rollAngZ = -targetVel.x / BALL_RADIUS;
+
+    if (this.rapierWorld) {
+      const b = this.rapierWorld.ballBody;
+      const curVel = b.linvel();
+      b.wakeUp();
+      b.setLinvel({ x: targetVel.x, y: Math.min(curVel.y, 1.5), z: targetVel.z }, true);
+      b.setAngvel({ x: rollAngX, y: 0, z: rollAngZ }, true);
+    } else {
+      this.state.vel.x = targetVel.x;
+      this.state.vel.z = targetVel.z;
+      this.state.spin.x = rollAngX;
+      this.state.spin.y = 0;
+      this.state.spin.z = rollAngZ;
+    }
+  }
+
   public setPositionAndStop(pos: Vec3): void {
+    const py = Math.max(BALL_RADIUS, pos.y);
     this.state.pos.x = pos.x;
-    this.state.pos.y = Math.max(BALL_RADIUS, pos.y);
+    this.state.pos.y = py;
     this.state.pos.z = pos.z;
     this.state.vel.x = 0;
     this.state.vel.y = 0;
@@ -334,6 +438,13 @@ export class BallPhysics implements IBallPhysics {
     this.state.spin.z = 0;
     this.state.isSuperShot = false;
     this.scoredInsideNet = null;
+    if (this.rapierWorld) {
+      const b = this.rapierWorld.ballBody;
+      b.setTranslation({ x: pos.x, y: py, z: pos.z }, true);
+      b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      b.resetForces(true);
+    }
     this.syncVisualMesh();
   }
 
@@ -361,6 +472,10 @@ export class BallPhysics implements IBallPhysics {
       this.updateTrajectoryArc(config);
       const spd = Math.hypot(this.state.vel.x, this.state.vel.y, this.state.vel.z);
       return { goalScored: null, hitPost: false, bounced: false, speed: spd };
+    }
+
+    if (this.rapierWorld) {
+      return this.updateWithRapier(safeDt, config);
     }
 
     const substeps = Math.max(1, Math.min(4, Math.ceil(safeDt / MAX_SUBSTEP)));
@@ -545,6 +660,66 @@ export class BallPhysics implements IBallPhysics {
       goalScored,
       hitPost,
       bounced,
+      speed: totalSpeed,
+    };
+  }
+
+  private updateWithRapier(safeDt: number, config: StadiumConfig): BallTickResult {
+    const rw = this.rapierWorld!;
+    const events = rw.step(safeDt);
+
+    const b = rw.ballBody;
+    const t = b.translation();
+    const q = b.rotation();
+    const lv = b.linvel();
+    const av = b.angvel();
+
+    this.state.pos.x = t.x;
+    this.state.pos.y = t.y;
+    this.state.pos.z = t.z;
+    this.state.vel.x = lv.x;
+    this.state.vel.y = lv.y;
+    this.state.vel.z = lv.z;
+    this.state.spin.x = av.x;
+    this.state.spin.y = av.y;
+    this.state.spin.z = av.z;
+
+    if (events.deflectedByPlayerId) {
+      this.state.lastTouchPlayerId = events.deflectedByPlayerId;
+    }
+
+    this.ballSphere.quaternion.set(q.x, q.y, q.z, q.w);
+
+    const goalHalfW = config.goalWidth * 0.5;
+    const insideGoalX = Math.abs(t.x) < goalHalfW - 0.05;
+    const insideGoalY = t.y < config.goalHeight - 0.05;
+
+    if (Math.abs(t.z) < config.halfLength - 1.0) {
+      this.scoredInsideNet = null;
+    }
+
+    let goalScored: TeamId | null = null;
+    if (t.z > config.halfLength && insideGoalX && insideGoalY && this.scoredInsideNet === null) {
+      this.scoredInsideNet = 'red';
+      goalScored = 'red';
+    } else if (t.z < -config.halfLength && insideGoalX && insideGoalY && this.scoredInsideNet === null) {
+      this.scoredInsideNet = 'blue';
+      goalScored = 'blue';
+    }
+
+    const totalSpeed = Math.hypot(lv.x, lv.y, lv.z);
+    if (this.state.isSuperShot && totalSpeed < 10.5) {
+      this.state.isSuperShot = false;
+    }
+
+    this.syncVisualMesh();
+    this.updateVisualEffects();
+    this.updateTrajectoryArc(config);
+
+    return {
+      goalScored,
+      hitPost: events.hitPost,
+      bounced: events.bounced,
       speed: totalSpeed,
     };
   }
@@ -810,6 +985,7 @@ export class BallPhysics implements IBallPhysics {
   }
 
   public dispose(): void {
+    this.rapierWorld = null;
     for (const d of this.disposables) {
       d.dispose();
     }

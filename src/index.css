@@ -208,17 +208,18 @@
   align-items: center;
   justify-content: center;
   min-width: 1.6rem;
-  height: 1.6rem;
-  padding: 0 0.4rem;
-  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  height: 1.55rem;
+  padding: 0 0.45rem;
+  font-family: 'Cairo', 'Tajawal', ui-sans-serif, system-ui, sans-serif;
   font-size: 0.72rem;
   font-weight: 800;
+  letter-spacing: 0;
   color: #fde68a;
   background: linear-gradient(180deg, #1e293b, #0f172a);
   border: 1px solid rgba(251, 191, 36, 0.45);
   border-bottom-width: 3px;
   border-radius: 0.45rem;
-  direction: ltr;
+  unicode-bidi: plaintext;
 }
 
 /* ───────────────────────── Stadium scanline / pitch art ───────────────────────── */

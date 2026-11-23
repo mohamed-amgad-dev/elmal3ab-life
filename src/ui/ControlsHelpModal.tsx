@@ -16,15 +16,16 @@ const SECTIONS: Section[] = [
     accent: '#10b981',
     rows: [
       ['W A S D', 'حرّك اللاعب'],
+      ['الماوس', 'لف الكاميرا 360° وحدد اتجاه الكرة والموزة'],
       ['Shift', 'جري سريع (بياكل النفَس)'],
-      ['Space', 'باص'],
-      ['E / RMB', 'شوط (اضغط واشحن وسيب)'],
+      ['كليك شمال / E', 'شوط (اشحن للمنطقة الخضراء وسيب!)'],
+      ['كليك يمين / Space', 'باص ذكي في اتجاه السهم'],
       ['C', 'ترقيصة'],
-      ['F', 'زحلقة'],
+      ['F', 'زحلقة فيزيائية'],
       ['V', 'غطس! (لو الأدمن سامح)'],
       ['R', 'شغب واحتجاج!'],
       ['Q', 'تبديل اللاعب (PES)'],
-      ['T', 'تغيير الكاميرا'],
+      ['T', 'تبديل منظور اللاعب الحر ⇄ العلوي'],
     ],
   },
   {
@@ -33,9 +34,9 @@ const SECTIONS: Section[] = [
     accent: '#fbbf24',
     rows: [
       ['A / D', 'اختار اتجاه الطيران'],
-      ['Space', 'طيران! (مع A/D أو الماوس)'],
-      ['E', 'تشتيت / رمية'],
-      ['الماوس', 'بص حواليك (منظور شخصي)'],
+      ['كليك شمال / Space', 'طيران للتصدي!'],
+      ['كليك يمين / E', 'تشتيت / رمية'],
+      ['الماوس', 'بص حواليك بسرعة (منظور شخصي)'],
     ],
   },
   {
@@ -83,7 +84,8 @@ const SECTIONS: Section[] = [
     accent: '#ff2e4c',
     rows: [
       ['M', 'قايمة تبديل الدور السريع'],
-      ['P / Esc', 'إيقاف مؤقت'],
+      ['Esc', 'تحرير مؤشر الماوس / إيقاف مؤقت'],
+      ['P', 'إيقاف مؤقت'],
     ],
   },
 ];
@@ -94,33 +96,32 @@ export default function ControlsHelpModal() {
 
   return (
     <div className="absolute inset-0 z-50">
-      <ModalShell maxWidth="max-w-5xl" onBackdrop={close}>
-        <div className="p-5">
-          <header className="mb-4 flex items-center justify-between gap-3">
+      <ModalShell maxWidth="max-w-6xl" onBackdrop={close}>
+        <div className="p-3.5">
+          <header className="mb-2 flex items-center justify-between gap-3">
             <div>
-              <h2 className="font-display text-2xl font-black text-white text-glow-gold">دليل التحكم 🎮</h2>
-              <p className="text-xs font-bold text-slate-400">كل اختصارات كل الأدوار في مكان واحد</p>
+              <h2 className="font-display text-lg font-black text-white text-glow-gold">دليل التحكم 🎮</h2>
             </div>
-            <button type="button" onClick={close} aria-label="إغلاق" className="btn-ghost h-10 w-10">
-              <X size={20} />
+            <button type="button" onClick={close} aria-label="إغلاق" className="btn-ghost h-8 w-8">
+              <X size={16} />
             </button>
           </header>
 
-          <div className="grid grid-cols-3 gap-3">
-            {SECTIONS.map((s) => (
+          <div className="grid grid-cols-3 gap-2">
+            {SECTIONS.map((s, idx) => (
               <section
                 key={s.title}
-                className="rounded-2xl border bg-slate-900/55 p-3"
+                className={`rounded-xl border bg-slate-900/55 p-2 ${idx === 0 ? 'col-span-2' : ''}`}
                 style={{ borderColor: `${s.accent}55` }}
               >
-                <h3 className="mb-2 flex items-center gap-2 text-sm font-black" style={{ color: s.accent }}>
-                  <span className="text-lg">{s.emoji}</span> {s.title}
+                <h3 className="mb-1 flex items-center gap-1.5 text-xs font-black" style={{ color: s.accent }}>
+                  <span className="text-sm">{s.emoji}</span> {s.title}
                 </h3>
-                <ul className="flex flex-col gap-1.5">
+                <ul className={idx === 0 ? 'grid grid-cols-2 gap-x-3 gap-y-0.5' : 'flex flex-col gap-0.5'}>
                   {s.rows.map(([k, d], i) => (
-                    <li key={`${k}-${i}`} className="flex items-center gap-2 text-[12px] font-bold text-slate-200">
+                    <li key={`${k}-${i}`} className="flex items-center gap-1.5 text-[10.5px] font-bold text-slate-200">
                       <span className="kbd shrink-0 whitespace-nowrap">{k}</span>
-                      <span className="leading-snug">{d}</span>
+                      <span className="leading-tight">{d}</span>
                     </li>
                   ))}
                 </ul>
@@ -128,8 +129,8 @@ export default function ControlsHelpModal() {
             ))}
           </div>
 
-          <div className="mt-4 flex justify-center">
-            <button type="button" onClick={close} className="btn-cta h-12 px-10 text-lg">
+          <div className="mt-2.5 flex justify-center">
+            <button type="button" onClick={close} className="btn-cta h-9 px-8 text-sm">
               تمام، فهمت! 👍
             </button>
           </div>

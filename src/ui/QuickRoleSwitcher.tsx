@@ -47,7 +47,7 @@ export default function QuickRoleSwitcher() {
   };
 
   return (
-    <div className="absolute right-3 bottom-3 flex w-[224px] flex-col items-stretch gap-2">
+    <div className="absolute right-3 bottom-[114px] flex w-[212px] flex-col items-stretch gap-2">
       {open && (
         <div className="glass anim-pop-in flex flex-col gap-1 rounded-2xl p-2" style={{ transformOrigin: 'bottom right' }}>
           {QUICK_ROLES.map((r) => (

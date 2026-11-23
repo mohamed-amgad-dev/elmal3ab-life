@@ -28,7 +28,7 @@ export default function ComedyToastFeed() {
   if (visible.length === 0) return null;
 
   return (
-    <div className="absolute top-3 left-3 flex w-[280px] flex-col gap-2">
+    <div className="absolute top-[94px] left-3 flex w-[270px] flex-col gap-2">
       {visible.map((e) => {
         const t = TONE_STYLE[e.tone];
         return (

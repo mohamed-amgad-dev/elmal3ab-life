@@ -1,10 +1,12 @@
 import { SoundEngine } from '../audio/SoundEngine';
 import { useGameStore } from '../store/useGameStore';
 import { DEFAULT_STADIUM_CONFIG } from '../types/stadium';
+import { AimingGuide3D } from './entities/AimingGuide3D';
 import { CharacterSystem } from './entities/CharacterSystem';
 import { MatchEngine } from './MatchEngine';
 import { BallPhysics } from './physics/BallPhysics';
 import { EffectsManager } from './physics/EffectsManager';
+import { initRapier, RapierPhysicsWorld } from './physics/RapierWorld';
 import { SceneManager } from './SceneManager';
 import { StadiumScene } from './stadium/StadiumScene';
 
@@ -13,6 +15,7 @@ export interface GameBootstrapHandle {
   readonly stadium: StadiumScene;
   readonly characters: CharacterSystem;
   readonly ball: BallPhysics;
+  readonly aimingGuide: AimingGuide3D;
   readonly effects: EffectsManager;
   readonly sound: SoundEngine;
   readonly engine: MatchEngine;
@@ -20,15 +23,16 @@ export interface GameBootstrapHandle {
 }
 
 /**
- * Composes and boots the full ElMal3abLife 3D WebGL runtime, wiring
- * SceneManager, StadiumScene, CharacterSystem, BallPhysics, EffectsManager,
- * SoundEngine, and MatchEngine with React StrictMode-safe teardown.
+ * Composes and boots the full ElMal3abLife 3D WebGL + Rapier3D runtime, wiring
+ * SceneManager, StadiumScene, CharacterSystem, BallPhysics, AimingGuide3D,
+ * EffectsManager, SoundEngine, and MatchEngine with React StrictMode-safe teardown.
  */
 export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle {
   const sceneManager = new SceneManager(container);
   const stadium = new StadiumScene(DEFAULT_STADIUM_CONFIG);
   const characters = new CharacterSystem();
   const ball = new BallPhysics();
+  const aimingGuide = new AimingGuide3D();
   const effects = new EffectsManager();
   const sound = new SoundEngine();
 
@@ -37,6 +41,7 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
 
   const scene = sceneManager.getScene();
   const camera = sceneManager.getCamera();
+  const canvasEl = sceneManager.getRenderer().domElement;
 
   // Mount camera and all 3D subsystem groups into the active Three.js scene
   scene.add(camera);
@@ -44,6 +49,7 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
   scene.add(characters.group);
   scene.add(ball.mesh);
   scene.add(ball.trajectoryLine);
+  scene.add(aimingGuide.group);
   scene.add(effects.group);
 
   const engine = new MatchEngine({
@@ -53,11 +59,26 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
     effects,
     sound,
     camera,
+    domElement: canvasEl,
+    aimingGuide,
     onRender: () => sceneManager.render(),
   });
 
   let disposed = false;
   let audioUnlocked = false;
+  let rapierWorld: RapierPhysicsWorld | null = null;
+
+  // Initialize Rapier3D WASM physics asynchronously (safe under StrictMode teardown)
+  initRapier()
+    .then(() => {
+      if (disposed) return;
+      rapierWorld = new RapierPhysicsWorld(DEFAULT_STADIUM_CONFIG);
+      ball.attachRapier(rapierWorld);
+      useGameStore.getState().updateMatchSnapshot({ physicsBackend: 'rapier3d' });
+    })
+    .catch((err) => {
+      console.warn('Rapier3D init failed, staying on fallback physics:', err);
+    });
 
   const removeAudioUnlockListeners = (): void => {
     if (typeof window === 'undefined') return;
@@ -102,6 +123,7 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
     engine.dispose();
 
     scene.remove(effects.group);
+    scene.remove(aimingGuide.group);
     scene.remove(ball.trajectoryLine);
     scene.remove(ball.mesh);
     scene.remove(characters.group);
@@ -109,7 +131,10 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
     scene.remove(camera);
 
     effects.dispose();
+    aimingGuide.dispose();
     ball.dispose();
+    rapierWorld?.dispose();
+    rapierWorld = null;
     characters.dispose();
     stadium.dispose();
     sound.dispose();
@@ -121,6 +146,7 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
     stadium,
     characters,
     ball,
+    aimingGuide,
     effects,
     sound,
     engine,

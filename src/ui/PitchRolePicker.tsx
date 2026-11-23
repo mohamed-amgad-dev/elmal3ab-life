@@ -55,7 +55,7 @@ const SPECTATOR_SLOT: SlotDef = {
 
 function defaultCamera(role: RoleType, cams: CameraMode[]): CameraMode {
   const preferred: Record<RoleType, CameraMode> = {
-    outfield: 'broadcast_top',
+    outfield: 'player_third',
     goalkeeper: 'gk_first_person',
     referee: 'referee_cam',
     coach: 'coach_touchline',

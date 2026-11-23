@@ -12,6 +12,7 @@ import {
   type MatchAward,
   type MatchPhase,
   type PlayerEntityState,
+  type ShotPrecisionZone,
   type TacticalStance,
   type TeamId,
   type VARState,
@@ -35,6 +36,10 @@ export interface MatchSnapshot {
   controlledPlayerId: string | null;
   nearestRefTargetId: string | null;
   shotCharge: number;
+  aimPrecisionZone: ShotPrecisionZone;
+  aimCurl: number;
+  pointerLocked: boolean;
+  physicsBackend: 'rapier3d' | 'fallback';
   stamina: number;
   skillCooldown: number;
   diveCooldown: number;
@@ -82,6 +87,10 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   controlledPlayerId: null,
   nearestRefTargetId: null,
   shotCharge: 0,
+  aimPrecisionZone: 'none',
+  aimCurl: 0,
+  pointerLocked: false,
+  physicsBackend: 'fallback',
   stamina: 100,
   skillCooldown: 0,
   diveCooldown: 0,
@@ -167,6 +176,8 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       controlledPlayerId: null,
       nearestRefTargetId: null,
       shotCharge: 0,
+      aimPrecisionZone: 'none',
+      aimCurl: 0,
       stamina: 100,
       skillCooldown: 0,
       diveCooldown: 0,

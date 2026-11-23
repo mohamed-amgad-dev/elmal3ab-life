@@ -155,12 +155,14 @@ export interface HumanSlotConfig {
   isBenched: boolean;
 }
 
+export type ShotPrecisionZone = 'none' | 'low' | 'good' | 'perfect' | 'overcharge';
+
 export const DEFAULT_HUMAN_SLOT: HumanSlotConfig = {
   team: 'red',
   role: 'outfield',
   positionRole: 'striker',
   controlMode: 'team_switch',
-  cameraMode: 'broadcast_top',
+  cameraMode: 'player_third',
   isBenched: false,
 };
 
