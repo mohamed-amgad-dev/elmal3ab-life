@@ -1,0 +1,106 @@
+import { HelpCircle, Pause, Play } from 'lucide-react';
+import { useGameStore } from '../store/useGameStore';
+import type { MatchPhase, TeamId } from '../types/game';
+import { MuteButton, STANCE_LABEL, TEAM_HEX, TEAM_NAMES, formatClock } from './uiKit';
+
+const PHASE_LABEL: Partial<Record<MatchPhase, string>> = {
+  kickoff: 'ضربة البداية',
+  paused_whistle: 'الحكم وقّف اللعب 🛑',
+  penalty_setup: 'بلنتي! 🎯',
+  var_review: 'مراجعة الفار 📺',
+  goal_celebration: 'جووول! 🎉',
+};
+
+function TeamBlock({ team }: { team: TeamId }) {
+  const score = useGameStore((s) => s.score[team]);
+  const stance = useGameStore((s) => s.tactics[team]);
+  const hex = TEAM_HEX[team];
+  const st = STANCE_LABEL[stance];
+  return (
+    <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
+      <div className="flex min-w-0 flex-col items-start gap-1">
+        <div className="flex items-center gap-1.5">
+          <span className="h-3 w-3 shrink-0 rounded-full" style={{ background: hex, boxShadow: `0 0 10px ${hex}` }} />
+          <span className="truncate text-sm font-black text-white">{TEAM_NAMES[team]}</span>
+        </div>
+        <span
+          className={`rounded-full border px-2 py-0.5 text-[10px] leading-tight font-bold whitespace-nowrap ${
+            stance === 'balanced'
+              ? 'border-slate-600/60 bg-slate-800/60 text-slate-300'
+              : 'border-amber-300/60 bg-amber-400/15 text-amber-200'
+          }`}
+        >
+          {st.emoji} {st.label}
+        </span>
+      </div>
+      <span
+        key={score}
+        className="anim-pop-in min-w-[2.2ch] text-center font-display text-5xl leading-none font-black tabular-nums"
+        style={{ color: '#fff', textShadow: `0 0 20px ${hex}` }}
+      >
+        {score}
+      </span>
+    </div>
+  );
+}
+
+export default function Scoreboard() {
+  const clockSec = useGameStore((s) => s.clockSec);
+  const phase = useGameStore((s) => s.phase);
+  const isPaused = useGameStore((s) => s.isPaused);
+  const setControlsOpen = useGameStore((s) => s.setControlsOpen);
+  const dispatchCommand = useGameStore((s) => s.dispatchCommand);
+
+  const low = clockSec <= 15 && clockSec > 0;
+  const phaseLabel = PHASE_LABEL[phase];
+
+  return (
+    <div className="absolute top-3 left-1/2 flex -translate-x-1/2 items-stretch gap-2">
+      <div className="glass flex w-[540px] items-center gap-4 rounded-2xl px-5 py-2.5" style={{ borderColor: 'rgba(251,191,36,0.25)' }}>
+        <TeamBlock team="red" />
+
+        <div className="flex w-[104px] shrink-0 flex-col items-center">
+          <div
+            className={`rounded-lg border px-3 py-0.5 font-display text-2xl leading-tight font-black tabular-nums ${
+              low
+                ? 'anim-blink border-rose-400/70 bg-rose-500/20 text-rose-200'
+                : 'border-amber-300/40 bg-slate-950/70 text-amber-200'
+            }`}
+            dir="ltr"
+          >
+            {formatClock(clockSec)}
+          </div>
+          <div className="mt-0.5 h-4 text-[10px] leading-4 font-bold whitespace-nowrap text-cyan-300">
+            {phaseLabel ?? (isPaused ? 'إيقاف مؤقت ⏸' : 'مباشر 🔴')}
+          </div>
+        </div>
+
+        <TeamBlock team="blue" />
+      </div>
+
+      <div className="glass flex flex-col items-center justify-center gap-1.5 rounded-2xl p-1.5">
+        <div className="flex items-center gap-1.5">
+          <MuteButton size="sm" />
+          <button
+            type="button"
+            onClick={() => setControlsOpen(true)}
+            title="دليل التحكم"
+            aria-label="دليل التحكم"
+            className="btn-ghost h-9 w-9 text-cyan-300"
+          >
+            <HelpCircle size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => dispatchCommand({ type: 'togglePause' })}
+            title="إيقاف مؤقت"
+            aria-label="إيقاف مؤقت"
+            className="btn-ghost h-9 w-9 text-amber-300"
+          >
+            {isPaused ? <Play size={18} /> : <Pause size={18} />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

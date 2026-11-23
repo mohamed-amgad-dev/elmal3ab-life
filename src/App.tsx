@@ -1,22 +1,29 @@
-import { useGameStore } from './store/useGameStore';
+import { useEffect, useRef } from 'react';
+import { createGameBootstrap } from './engine/GameBootstrap';
+import GameUI from './ui/GameUI';
 
 export default function App() {
-  const phase = useGameStore((s) => s.phase);
-  const rules = useGameStore((s) => s.rules);
+  const canvasContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const container = canvasContainerRef.current;
+    if (!container) return;
+
+    const runtime = createGameBootstrap(container);
+    return () => {
+      runtime.dispose();
+    };
+  }, []);
 
   return (
-    <main className="flex h-full w-full flex-col items-center justify-center bg-[#050918] p-6 text-center text-white">
-      <div className="rounded-2xl border border-emerald-400/30 bg-slate-900/80 px-8 py-6 shadow-2xl">
-        <h1 className="text-4xl font-black tracking-tight text-amber-400">
-          الملعب لايف — ElMal3abLife
-        </h1>
-        <p className="mt-2 text-base font-semibold text-emerald-300">
-          جاري تجهيز الاستاد الليلي...
-        </p>
-        <p className="mt-3 text-xs text-slate-400">
-          Phase: {phase} | Preset: {rules.preset}
-        </p>
-      </div>
-    </main>
+    <div className="relative h-full w-full overflow-hidden bg-[#050918]">
+      <div
+        ref={canvasContainerRef}
+        onContextMenu={(e) => e.preventDefault()}
+        className="fixed inset-0 z-0 h-full w-full overflow-hidden"
+        aria-label="ملعب لايف ثلاثي الأبعاد"
+      />
+      <GameUI />
+    </div>
   );
 }
