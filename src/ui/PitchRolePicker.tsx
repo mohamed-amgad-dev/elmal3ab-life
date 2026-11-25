@@ -1,13 +1,14 @@
 import type { ReactNode } from 'react';
 import { Camera, Gamepad2, Lock, Shield } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
-import type {
-  CameraMode,
-  ControlMode,
-  HumanSlotConfig,
-  OutfieldPosition,
-  RoleType,
-  TeamId,
+import {
+  isDualHumanSlotConflict,
+  type CameraMode,
+  type ControlMode,
+  type HumanSlotConfig,
+  type OutfieldPosition,
+  type RoleType,
+  type TeamId,
 } from '../types/game';
 import {
   CAMERA_LABEL,
@@ -64,42 +65,68 @@ function defaultCamera(role: RoleType, cams: CameraMode[]): CameraMode {
   return cams.includes(preferred[role]) ? preferred[role] : cams[0];
 }
 
+function matchesSlot(s: HumanSlotConfig, d: SlotDef): boolean {
+  return (
+    s.role === d.role &&
+    (d.role === 'referee' ||
+      d.role === 'spectator' ||
+      (s.team === d.team && (d.role !== 'outfield' || s.positionRole === d.pos)))
+  );
+}
+
 function SlotButton({
   def,
   selected,
+  remoteSelected,
+  showPlayerBadges,
   disabled,
+  disabledReason,
   onSelect,
   absolute,
   note,
 }: {
   def: SlotDef;
   selected: boolean;
+  remoteSelected?: boolean;
+  showPlayerBadges?: boolean;
   disabled?: boolean;
+  disabledReason?: string;
   onSelect: () => void;
   absolute?: boolean;
   note?: ReactNode;
 }) {
   const color = def.role === 'referee' ? '#fbbf24' : TEAM_HEX[def.team];
+  const circleBorder = remoteSelected && !selected ? '#a78bfa' : color;
+  const circleShadow = selected
+    ? `0 0 0 3px rgba(255,255,255,0.85), 0 0 22px ${color}`
+    : remoteSelected
+      ? '0 0 0 3px rgba(196,181,253,0.9), 0 0 20px rgba(139,92,246,0.9)'
+      : `0 0 10px ${color}66`;
+
   return (
     <button
       type="button"
       disabled={disabled}
       onClick={onSelect}
       aria-pressed={selected}
-      title={disabled ? 'متاح لما الأدمن يفعّله' : def.label}
-      className={`group flex flex-col items-center gap-1 transition ${
+      title={disabled ? disabledReason || 'متاح لما الأدمن يفعّله' : def.label}
+      className={`group flex flex-col items-center gap-0.5 transition ${
         absolute ? 'absolute -translate-x-1/2 -translate-y-1/2' : ''
-      } ${disabled ? 'opacity-35 grayscale' : ''}`}
+      } ${disabled ? 'cursor-not-allowed opacity-40 grayscale' : ''}`}
       style={absolute && def.at ? { left: `${def.at.left}%`, top: `${def.at.top}%` } : undefined}
     >
       <span
         className={`flex h-11 w-11 items-center justify-center rounded-full border-2 text-xl transition group-hover:scale-110 ${
-          selected ? 'scale-110' : ''
+          selected || remoteSelected ? 'scale-110' : ''
         }`}
         style={{
-          borderColor: color,
-          background: selected ? color : 'rgba(2,6,23,0.8)',
-          boxShadow: selected ? `0 0 0 3px rgba(255,255,255,0.85), 0 0 22px ${color}` : `0 0 10px ${color}66`,
+          borderColor: circleBorder,
+          background: selected
+            ? color
+            : remoteSelected
+              ? 'rgba(76,29,149,0.75)'
+              : 'rgba(2,6,23,0.8)',
+          boxShadow: circleShadow,
         }}
       >
         {def.emoji}
@@ -111,6 +138,20 @@ function SlotButton({
       >
         {def.label}
       </span>
+      {showPlayerBadges && (selected || remoteSelected) && (
+        <span className="flex items-center justify-center gap-1">
+          {selected && (
+            <span className="rounded-full bg-amber-400 px-1.5 py-0.5 text-[9px] leading-none font-black whitespace-nowrap text-slate-950 shadow-[0_0_10px_rgba(251,191,36,0.85)]">
+              أنت ⭐
+            </span>
+          )}
+          {remoteSelected && (
+            <span className="rounded-full border border-violet-200/80 bg-violet-600 px-1.5 py-0.5 text-[9px] leading-none font-black whitespace-nowrap text-white shadow-[0_0_12px_rgba(167,139,250,0.95)]">
+              صاحبك 🌐
+            </span>
+          )}
+        </span>
+      )}
       {note}
     </button>
   );
@@ -119,7 +160,14 @@ function SlotButton({
 export default function PitchRolePicker() {
   const rules = useGameStore((s) => s.rules);
   const slot = useGameStore((s) => s.humanSlot);
+  const hostSlot = useGameStore((s) => s.hostSlot);
+  const network = useGameStore((s) => s.network);
   const setHumanSlot = useGameStore((s) => s.setHumanSlot);
+
+  const isOnline = network.mode !== 'offline';
+  const isGuest = network.mode === 'guest';
+  const showRemote = isOnline && (network.peerConnected || isGuest);
+  const remoteSlot = network.mode === 'host' ? network.guestSlot : hostSlot;
 
   const choose = (patch: Partial<HumanSlotConfig> & Pick<HumanSlotConfig, 'role'>) => {
     const cams = allowedCamerasFor(patch.role, rules);
@@ -135,11 +183,21 @@ export default function PitchRolePicker() {
     });
   };
 
-  const isSelected = (d: SlotDef) =>
-    slot.role === d.role &&
-    (d.role === 'referee' ||
-      d.role === 'spectator' ||
-      (slot.team === d.team && (d.role !== 'outfield' || slot.positionRole === d.pos)));
+  const isSelected = (d: SlotDef) => matchesSlot(slot, d);
+  const isRemoteSelected = (d: SlotDef) => showRemote && matchesSlot(remoteSlot, d);
+
+  const slotAvailability = (d: SlotDef): { disabled: boolean; reason?: string } => {
+    if (!isRoleAvailable(d.role, rules)) {
+      return { disabled: true, reason: 'متاح لما الأدمن يفعّله' };
+    }
+    if (isGuest) {
+      const check = isDualHumanSlotConflict(hostSlot, d.role, d.team, d.pos, rules);
+      if (check.conflict) {
+        return { disabled: true, reason: check.reason };
+      }
+    }
+    return { disabled: false };
+  };
 
   const pickSlot = (d: SlotDef) =>
     choose({
@@ -148,17 +206,23 @@ export default function PitchRolePicker() {
       positionRole: d.pos ?? slot.positionRole,
     });
 
-  const CoachCell = ({ def }: { def: SlotDef }) => (
-    <div className="flex items-center gap-2">
-      <span className={`text-[11px] font-black ${TEAM_TEXT[def.team]}`}>{TEAM_NAMES[def.team]}</span>
-      <SlotButton
-        def={def}
-        selected={isSelected(def)}
-        disabled={!isRoleAvailable('coach', rules)}
-        onSelect={() => pickSlot(def)}
-      />
-    </div>
-  );
+  const CoachCell = ({ def }: { def: SlotDef }) => {
+    const avail = slotAvailability(def);
+    return (
+      <div className="flex items-center gap-2">
+        <span className={`text-[11px] font-black ${TEAM_TEXT[def.team]}`}>{TEAM_NAMES[def.team]}</span>
+        <SlotButton
+          def={def}
+          selected={isSelected(def)}
+          remoteSelected={isRemoteSelected(def)}
+          showPlayerBadges={isOnline}
+          disabled={avail.disabled}
+          disabledReason={avail.reason}
+          onSelect={() => pickSlot(def)}
+        />
+      </div>
+    );
+  };
 
   const cams = allowedCamerasFor(slot.role, rules, slot.isBenched);
   const isGK = slot.role === 'goalkeeper';
@@ -182,13 +246,23 @@ export default function PitchRolePicker() {
 
   return (
     <section className="glass flex min-h-0 flex-col rounded-3xl">
-      <header className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-4 py-3">
         <div className="flex items-center gap-2">
           <Shield size={20} className="text-emerald-300" />
           <h2 className="text-lg font-black text-white">اختار مكانك في الملعب</h2>
         </div>
-        <div className="rounded-full border border-amber-300/60 bg-amber-400/10 px-3 py-1 text-xs font-black text-amber-200">
-          مكانك: {roleSummary}
+        <div className="flex items-center gap-2">
+          {isOnline && (
+            <div className="flex items-center gap-1.5 rounded-full border border-white/10 bg-slate-950/60 px-2.5 py-1 text-[10px] font-black">
+              <span className="rounded-full bg-amber-400 px-1.5 py-0.5 text-slate-950">أنت ⭐</span>
+              {showRemote && (
+                <span className="rounded-full bg-violet-600 px-1.5 py-0.5 text-white">صاحبك 🌐</span>
+              )}
+            </div>
+          )}
+          <div className="rounded-full border border-amber-300/60 bg-amber-400/10 px-3 py-1 text-xs font-black text-amber-200">
+            مكانك: {roleSummary}
+          </div>
         </div>
       </header>
 
@@ -211,23 +285,33 @@ export default function PitchRolePicker() {
             🌊 {TEAM_NAMES.blue}
           </div>
 
-          {PITCH_SLOTS.map((d) => (
-            <SlotButton
-              key={d.key}
-              def={d}
-              absolute
-              selected={isSelected(d)}
-              disabled={!isRoleAvailable(d.role, rules)}
-              onSelect={() => pickSlot(d)}
-              note={
-                d.role === 'goalkeeper' ? (
-                  <span className="flex items-center gap-1 rounded-full bg-amber-400 px-1.5 py-0.5 text-[9px] leading-none font-black whitespace-nowrap text-slate-900">
-                    <Lock size={9} /> منظور شخصي فقط 🧤
-                  </span>
-                ) : undefined
-              }
-            />
-          ))}
+          {PITCH_SLOTS.map((d) => {
+            const avail = slotAvailability(d);
+            return (
+              <SlotButton
+                key={d.key}
+                def={d}
+                absolute
+                selected={isSelected(d)}
+                remoteSelected={isRemoteSelected(d)}
+                showPlayerBadges={isOnline}
+                disabled={avail.disabled}
+                disabledReason={avail.reason}
+                onSelect={() => pickSlot(d)}
+                note={
+                  d.role === 'goalkeeper' ? (
+                    <span className="flex items-center gap-1 rounded-full bg-amber-400 px-1.5 py-0.5 text-[9px] leading-none font-black whitespace-nowrap text-slate-900">
+                      <Lock size={9} /> منظور شخصي فقط 🧤
+                    </span>
+                  ) : avail.disabled && avail.reason && isGuest ? (
+                    <span className="rounded-full bg-rose-950/90 px-1.5 py-0.5 text-[9px] leading-none font-black whitespace-nowrap text-rose-200 border border-rose-400/50">
+                      محجوز للهوست
+                    </span>
+                  ) : undefined
+                }
+              />
+            );
+          })}
         </div>
 
         {/* coach strip */}
@@ -236,6 +320,8 @@ export default function PitchRolePicker() {
           <SlotButton
             def={SPECTATOR_SLOT}
             selected={slot.role === 'spectator'}
+            remoteSelected={isRemoteSelected(SPECTATOR_SLOT)}
+            showPlayerBadges={isOnline}
             onSelect={() => pickSlot(SPECTATOR_SLOT)}
           />
           <CoachCell def={COACH_SLOTS[1]} />

@@ -1,7 +1,10 @@
-import { Flame, Gamepad2, Keyboard, Sparkles, Trophy } from 'lucide-react';
+import { useEffect } from 'react';
+import { Flame, Gamepad2, Globe, Keyboard, Sparkles, Trophy } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import { DEFAULT_HUMAN_SLOT } from '../types/game';
 import { MuteButton } from './uiKit';
+
+let inviteRedirected = false;
 
 export default function MainMenu() {
   const setPhase = useGameStore((s) => s.setPhase);
@@ -9,6 +12,15 @@ export default function MainMenu() {
   const applyPreset = useGameStore((s) => s.applyPreset);
   const setHumanSlot = useGameStore((s) => s.setHumanSlot);
   const dispatchCommand = useGameStore((s) => s.dispatchCommand);
+
+  // Invite link (?room=ML3B-XXXX) → jump straight into the lobby where the room panel auto-joins.
+  useEffect(() => {
+    if (inviteRedirected) return;
+    if (new URLSearchParams(window.location.search).get('room')) {
+      inviteRedirected = true;
+      setPhase('lobby');
+    }
+  }, [setPhase]);
 
   const quickPlay = () => {
     applyPreset('chaos');
@@ -67,6 +79,19 @@ export default function MainMenu() {
           >
             <Gamepad2 size={28} />
             ادخل الملعب / إعداد الروم
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setPhase('lobby')}
+            className="btn-cta h-14 px-6 text-xl"
+            style={{
+              background: 'linear-gradient(135deg,#7c3aed,#06b6d4)',
+              boxShadow: '0 0 26px rgba(139,92,246,0.55)',
+            }}
+          >
+            <Globe size={24} />
+            العب أونلاين مع صاحبك 🌐
           </button>
 
           <button
