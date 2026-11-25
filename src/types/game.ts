@@ -30,6 +30,18 @@ export type TacticalStance =
   | 'park_the_bus'
   | 'high_press';
 
+export type GraphicsQuality = 'high' | 'medium' | 'low';
+
+export type NetworkMode = 'offline' | 'host' | 'guest';
+
+export type NetworkStatus =
+  | 'idle'
+  | 'creating'
+  | 'waiting_peer'
+  | 'connecting'
+  | 'connected'
+  | 'error';
+
 export type CharacterAnimState =
   | 'idle'
   | 'run'
@@ -66,6 +78,7 @@ export type MatchPhase =
   | 'penalty_setup'
   | 'var_review'
   | 'goal_celebration'
+  | 'goal_replay'
   | 'full_time';
 
 export interface AdminRules {
@@ -135,6 +148,8 @@ export interface PlayerEntityState {
   role: RoleType;
   positionRole?: OutfieldPosition;
   isHumanControlled: boolean;
+  /** True when controlled by the remote P2 peer (distinguishes P2 human from local P1 human & AI). */
+  isRemoteHuman?: boolean;
   isBenched: boolean;
   isSentOff: boolean;
   yellowCards: number;
@@ -166,10 +181,108 @@ export const DEFAULT_HUMAN_SLOT: HumanSlotConfig = {
   isBenched: false,
 };
 
+export const DEFAULT_GUEST_SLOT: HumanSlotConfig = {
+  team: 'blue',
+  role: 'outfield',
+  positionRole: 'striker',
+  controlMode: 'team_switch',
+  cameraMode: 'player_third',
+  isBenched: false,
+};
+
+export interface NetworkState {
+  mode: NetworkMode;
+  status: NetworkStatus;
+  roomCode: string;
+  peerConnected: boolean;
+  pingMs: number;
+  voiceActive: boolean;
+  micMuted: boolean;
+  errorMessage: string | null;
+  guestSlot: HumanSlotConfig;
+}
+
+export const DEFAULT_NETWORK_STATE: NetworkState = {
+  mode: 'offline',
+  status: 'idle',
+  roomCode: '',
+  peerConnected: false,
+  pingMs: 0,
+  voiceActive: false,
+  micMuted: true,
+  errorMessage: null,
+  guestSlot: { ...DEFAULT_GUEST_SLOT },
+};
+
+export interface GoalReplayState {
+  active: boolean;
+  scoringTeam: TeamId | null;
+  scorerName: string;
+  elapsed: number;
+  duration: number;
+}
+
+export const GOAL_REPLAY_DURATION_SEC = 3.0;
+
+export const INITIAL_GOAL_REPLAY_STATE: GoalReplayState = {
+  active: false,
+  scoringTeam: null,
+  scorerName: '',
+  elapsed: 0,
+  duration: GOAL_REPLAY_DURATION_SEC,
+};
+
+/* ─────────────── v3 Rematch Feel & P2P Timing Constants ─────────────── */
+
+export const MIN_MOUSE_SENSITIVITY = 0.4;
+export const MAX_MOUSE_SENSITIVITY = 2.2;
+export const DEFAULT_MOUSE_SENSITIVITY = 1.0;
+
+/** Host snapshot broadcast rate (25Hz = 40ms) and Guest input send rate (30Hz = 33ms). */
+export const HOST_SNAPSHOT_HZ = 25;
+export const GUEST_INPUT_HZ = 30;
+/** Guest entity/ball render interpolation buffer (~70ms) and teleport snap threshold (6m). */
+export const GUEST_INTERP_DELAY_MS = 70;
+export const GUEST_SNAP_DISTANCE_M = 6.0;
+
+/** Rematch feel parameters (`#38`). */
+export const LOB_HOLD_THRESHOLD_MS = 180;
+export const KNOCK_ON_PUSH_M = 1.4;
+export const KNOCK_ON_SPEED_BOOST = 1.22;
+export const HIT_STOP_DURATION_SEC = 0.055;
+
+/* ─────────────── Egyptian Quick-Chat Phrases (`B` + `1`..`8`) ─────────────── */
+
+export interface QuickChatPhrase {
+  id: string;
+  key: string;
+  text: string;
+  emoji: string;
+}
+
+export const QUICK_CHAT_PHRASES: readonly QuickChatPhrase[] = [
+  { id: 'pass_selfish', key: '1', text: 'باصي يا أناني!', emoji: '😤' },
+  { id: 'rocket_shot', key: '2', text: 'صاروخ أرض جو!', emoji: '🚀' },
+  { id: 'ref_bribed', key: '3', text: 'الحكم بايع الماتش!', emoji: '💸' },
+  { id: 'check_var', key: '4', text: 'شوف الفار يا كابتن!', emoji: '📺' },
+  { id: 'octopus_gk', key: '5', text: 'أنا الأخطبوط!', emoji: '🐙' },
+  { id: 'sub_me_in', key: '6', text: 'نزلني هجيب جون!', emoji: '🪑' },
+  { id: 'oscar_dive', key: '7', text: 'غطس أوسكار!', emoji: '🎭' },
+  { id: 'robbed_goal', key: '8', text: 'حرام دي جون!', emoji: '😭' },
+] as const;
+
+export function getQuickChatPhrase(idOrKey: string): QuickChatPhrase | undefined {
+  return QUICK_CHAT_PHRASES.find((p) => p.id === idOrKey || p.key === idOrKey);
+}
+
+/* ─────────────── Game Commands ─────────────── */
+
 export type GameCommand =
   | { type: 'move'; dx: number; dz: number }
   | { type: 'sprint'; active: boolean }
   | { type: 'pass' }
+  | { type: 'lobPass'; holdRatio?: number }
+  | { type: 'knockOn' }
   | { type: 'shootStart' }
   | { type: 'shootRelease' }
   | { type: 'skillMove' }
@@ -192,8 +305,12 @@ export type GameCommand =
   | { type: 'spectatorCheer' }
   | { type: 'spectatorBoo' }
   | { type: 'spectatorFireworks' }
+  | { type: 'quickChat'; phraseId: string }
+  | { type: 'skipGoalReplay' }
   | { type: 'switchCamera'; camera?: CameraMode }
   | { type: 'sandboxSwitchRole'; role: RoleType; team?: TeamId; benchSelf?: boolean }
+  | { type: 'setMouseSensitivity'; value: number }
+  | { type: 'setGraphicsQuality'; quality: GraphicsQuality }
   | { type: 'startMatch' }
   | { type: 'restartMatch' }
   | { type: 'returnToLobby' }
@@ -240,4 +357,206 @@ export interface BallStateSnapshot {
   isSuperShot: boolean;
   lastTouchPlayerId: string | null;
   lastTouchTeam: TeamId | null;
+}
+
+/* ─────────────── P2P WebRTC Wire Packets (`peerjs`) ─────────────── */
+
+export interface GuestInputPacket {
+  seq: number;
+  clientTime: number;
+  moveDx: number;
+  moveDz: number;
+  aimAngle: number;
+  sprint: boolean;
+  commands: GameCommand[];
+  slot?: HumanSlotConfig;
+}
+
+export interface WorldSnapshotPacket {
+  seq: number;
+  hostTime: number;
+  phase: MatchPhase;
+  clockSec: number;
+  score: Record<TeamId, number>;
+  players: PlayerEntityState[];
+  hostControlledId: string | null;
+  guestControlledId: string | null;
+  ball: BallStateSnapshot & { quat: [number, number, number, number] };
+  tactics: Record<TeamId, TacticalStance>;
+  varState: VARState;
+  goalReplayState: GoalReplayState;
+  hitStopRemaining: number;
+  guestStamina: number;
+  guestShotCharge: number;
+  guestPrecisionZone: ShotPrecisionZone;
+  guestSkillCd: number;
+  guestDiveCd: number;
+  guestGkDiveCd: number;
+  events?: ComedyEvent[];
+  sfx?: Array<{ kind: string; power?: number }>;
+}
+
+export interface LobbySyncPacket {
+  rules: AdminRules;
+  hostSlot: HumanSlotConfig;
+  guestSlot: HumanSlotConfig;
+  phase: MatchPhase;
+}
+
+export type PeerWireMessage =
+  | { type: 'guest_input'; packet: GuestInputPacket }
+  | { type: 'world_snapshot'; snapshot: WorldSnapshotPacket }
+  | { type: 'lobby_sync'; packet: LobbySyncPacket }
+  | { type: 'guest_slot'; slot: HumanSlotConfig }
+  | { type: 'quick_chat'; phraseId: string; sender: 'host' | 'guest'; playerId?: string | null }
+  | { type: 'ping'; seq: number; sentAt: number }
+  | { type: 'pong'; seq: number; sentAt: number };
+
+/* ─────────────── Dual-Human Slot Conflict Resolution Rules ─────────────── */
+
+/**
+ * Dual-Human (P1 Host + P2 Guest) Slot Ownership & Conflict Resolution Rules:
+ *
+ * 1. **Authoritative Priority**: Host (`hostSlot`) has priority when resolving simultaneous
+ *    or conflicting Guest (`guestSlot`) selections.
+ * 2. **Single Human Referee**: At most ONE human `referee` is permitted (`rules.enableHumanRef`
+ *    must be `true`). If `primarySlot.role === 'referee'`, a second human requesting `referee`
+ *    is reassigned to `outfield` (`striker`).
+ * 3. **Single Human Goalkeeper / Coach Per Team**: At most ONE human `goalkeeper` and ONE human
+ *    `coach` per `TeamId` (`'red'` or `'blue'`). Opposing human GKs (`red` GK vs `blue` GK) are
+ *    fully allowed; same-team duplicate `goalkeeper` or `coach` resolves to same-team `outfield`
+ *    (`defender`).
+ * 4. **Same-Team Outfield Co-Op**: Two humans on the SAME team as `outfield` are allowed and
+ *    assigned distinct `OutfieldPosition` roles (`'striker'` vs `'defender'`) so they spawn onto
+ *    distinct entities (`hostControlledId !== guestControlledId`).
+ * 5. **Team-Switch (`Q`) Mutual Exclusion**: During `switchPlayer`, `MatchEngine` MUST skip any
+ *    entity currently controlled by the other human (`entity.id !== otherHumanControlledId`).
+ *    In 2v2 (`teamSize === 2`, 1 GK + 1 outfielder per team), same-team co-op cannot put 2 humans
+ *    on 1 outfielder—second human on that team resolves to `goalkeeper` if free, else opposite team.
+ */
+export function isDualHumanSlotConflict(
+  primarySlot: HumanSlotConfig,
+  candidateRole: RoleType,
+  candidateTeam: TeamId,
+  candidatePos?: OutfieldPosition,
+  rules?: Partial<Pick<AdminRules, 'enableHumanRef' | 'enableCoachBench' | 'teamSize'>>,
+): { conflict: boolean; reason?: string } {
+  if (candidateRole === 'referee') {
+    if (rules?.enableHumanRef === false) {
+      return { conflict: true, reason: 'الحكم البشري مقفول في إعدادات الروم' };
+    }
+    if (primarySlot.role === 'referee') {
+      return { conflict: true, reason: 'فيه حكم بشري تاني في الماتش' };
+    }
+  }
+
+  if (candidateRole === 'coach') {
+    if (rules?.enableCoachBench === false) {
+      return { conflict: true, reason: 'المدرب مقفول في إعدادات الروم' };
+    }
+    if (primarySlot.role === 'coach' && primarySlot.team === candidateTeam) {
+      return { conflict: true, reason: 'الفريق ده عنده مدرب بشري بالفعل' };
+    }
+  }
+
+  if (
+    candidateRole === 'goalkeeper' &&
+    primarySlot.role === 'goalkeeper' &&
+    primarySlot.team === candidateTeam &&
+    !primarySlot.isBenched
+  ) {
+    return { conflict: true, reason: 'مرمى الفريق ده محجوز للاعب التاني' };
+  }
+
+  if (
+    candidateRole === 'outfield' &&
+    primarySlot.role === 'outfield' &&
+    primarySlot.team === candidateTeam &&
+    !primarySlot.isBenched
+  ) {
+    if (rules?.teamSize === 2) {
+      return { conflict: true, reason: 'في نظام 2 ضد 2 يوجد لاعب ميدان واحد فقط لكل فريق' };
+    }
+    if (candidatePos && primarySlot.positionRole === candidatePos) {
+      return { conflict: true, reason: 'المركز ده محجوز لزميلك في الفريق' };
+    }
+  }
+
+  return { conflict: false };
+}
+
+export function resolveDualHumanSlotConflict(
+  primarySlot: HumanSlotConfig,
+  candidateSlot: HumanSlotConfig,
+  rules?: Partial<
+    Pick<
+      AdminRules,
+      'enableHumanRef' | 'enableCoachBench' | 'allowTeamSwitch' | 'allowedCameras' | 'teamSize'
+    >
+  >,
+): HumanSlotConfig {
+  const next: HumanSlotConfig = { ...candidateSlot };
+  const defaultOutfieldCam: CameraMode =
+    rules?.allowedCameras === 'top_only' ? 'broadcast_top' : 'player_third';
+  const defaultControl: ControlMode =
+    rules?.allowTeamSwitch === false ? 'locked_player' : next.controlMode;
+
+  // 1. Referee conflict -> fallback to outfield
+  if (
+    next.role === 'referee' &&
+    (rules?.enableHumanRef === false || primarySlot.role === 'referee')
+  ) {
+    next.role = 'outfield';
+    next.positionRole = 'striker';
+    next.cameraMode = defaultOutfieldCam;
+    next.controlMode = defaultControl;
+    next.isBenched = false;
+  }
+
+  // 2. Coach conflict -> fallback to outfield on same team
+  if (
+    next.role === 'coach' &&
+    (rules?.enableCoachBench === false ||
+      (primarySlot.role === 'coach' && primarySlot.team === next.team))
+  ) {
+    next.role = 'outfield';
+    next.positionRole = 'defender';
+    next.cameraMode = defaultOutfieldCam;
+    next.controlMode = defaultControl;
+    next.isBenched = false;
+  }
+
+  // 3. Same-team goalkeeper conflict -> fallback to outfield defender on same team
+  if (
+    next.role === 'goalkeeper' &&
+    primarySlot.role === 'goalkeeper' &&
+    primarySlot.team === next.team &&
+    !primarySlot.isBenched &&
+    !next.isBenched
+  ) {
+    next.role = 'outfield';
+    next.positionRole = 'defender';
+    next.cameraMode = defaultOutfieldCam;
+    next.controlMode = defaultControl;
+  }
+
+  // 4. Same-team outfield co-op resolution
+  if (
+    next.role === 'outfield' &&
+    primarySlot.role === 'outfield' &&
+    primarySlot.team === next.team &&
+    !primarySlot.isBenched &&
+    !next.isBenched
+  ) {
+    if (rules?.teamSize === 2) {
+      // Only 1 outfielder exists per team in 2v2: move to free goalkeeper or opposing striker
+      next.role = 'goalkeeper';
+      next.cameraMode = 'gk_first_person';
+      next.controlMode = 'locked_player';
+    } else if (primarySlot.positionRole === next.positionRole) {
+      next.positionRole = primarySlot.positionRole === 'striker' ? 'defender' : 'striker';
+    }
+  }
+
+  return next;
 }

@@ -2,11 +2,24 @@ import type * as THREE from 'three';
 import type {
   BallStateSnapshot,
   GameCommand,
+  GraphicsQuality,
+  GuestInputPacket,
+  HumanSlotConfig,
+  LobbySyncPacket,
   PlayerEntityState,
   TeamId,
   Vec3,
+  WorldSnapshotPacket,
 } from './game';
 import type { StadiumConfig } from './stadium';
+
+export interface JumbotronUpdateState {
+  redScore: number;
+  blueScore: number;
+  clockSec: number;
+  headline?: string | null;
+  varActive?: boolean;
+}
 
 export interface IStadiumScene {
   group: THREE.Group;
@@ -18,6 +31,8 @@ export interface IStadiumScene {
   setCrowdExcitement(level: number): void;
   setVARActive(active: boolean): void;
   getBenchSeatPosition(team: TeamId, slotIndex: number): Vec3;
+  updateJumbotron?(state: JumbotronUpdateState): void;
+  setQuality?(quality: GraphicsQuality): void;
   dispose(): void;
 }
 
@@ -134,10 +149,36 @@ export interface ISoundEngine {
   dispose(): void;
 }
 
+export interface QuickChatNetworkEvent {
+  phraseId: string;
+  sender: 'host' | 'guest';
+  playerId?: string | null;
+}
+
+export interface INetworkManager {
+  createRoom(): Promise<string>;
+  joinRoom(roomCode: string): Promise<void>;
+  disconnect(): void;
+  sendGuestInput(packet: GuestInputPacket): void;
+  sendLobbySync(packet: LobbySyncPacket): void;
+  sendGuestSlotUpdate(slot: HumanSlotConfig): void;
+  broadcastSnapshot(snapshot: WorldSnapshotPacket): void;
+  sendQuickChat(phraseId: string, playerId?: string | null): void;
+  toggleVoiceChat(): Promise<boolean>;
+  setMicMuted(muted: boolean): void;
+  onGuestInput(cb: (packet: GuestInputPacket) => void): (() => void) | void;
+  onSnapshot(cb: (snapshot: WorldSnapshotPacket) => void): (() => void) | void;
+  onLobbySync(cb: (packet: LobbySyncPacket) => void): (() => void) | void;
+  onGuestSlotUpdate(cb: (slot: HumanSlotConfig) => void): (() => void) | void;
+  onQuickChat(cb: (event: QuickChatNetworkEvent) => void): (() => void) | void;
+  dispose(): void;
+}
+
 export interface IMatchEngine {
   start(): void;
   stop(): void;
   setPaused(paused: boolean): void;
   dispatchCommand(cmd: GameCommand): void;
+  setNetworkManager?(net: INetworkManager | null): void;
   dispose(): void;
 }
