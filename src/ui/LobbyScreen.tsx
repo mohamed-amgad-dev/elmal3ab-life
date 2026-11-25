@@ -4,7 +4,7 @@ import { useGameStore } from '../store/useGameStore';
 import AdminSettingsPanel from './AdminSettingsPanel';
 import OnlineRoomPanel from './OnlineRoomPanel';
 import PitchRolePicker from './PitchRolePicker';
-import { getNet } from './networkBridge';
+import { dismissInviteAutoJoin, getNet } from './networkBridge';
 import { MuteButton, sanitizeSlot } from './uiKit';
 
 export default function LobbyScreen() {
@@ -105,7 +105,10 @@ export default function LobbyScreen() {
       <footer className="glass-strong flex shrink-0 items-center justify-between gap-4 rounded-none border-x-0 border-b-0 px-6 py-3">
         <button
           type="button"
-          onClick={() => setPhase('menu')}
+          onClick={() => {
+            dismissInviteAutoJoin();
+            setPhase('menu');
+          }}
           className="btn-ghost h-14 gap-2 px-6 text-base"
         >
           <ArrowRight size={20} />

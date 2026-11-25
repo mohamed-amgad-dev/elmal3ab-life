@@ -1,10 +1,11 @@
-import { Keyboard, MousePointer, Play, RotateCcw, Sparkles, Users } from 'lucide-react';
+import { Keyboard, LogOut, MousePointer, Play, RotateCcw, Sparkles, Users } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import {
   MAX_MOUSE_SENSITIVITY,
   MIN_MOUSE_SENSITIVITY,
   type GraphicsQuality,
 } from '../types/game';
+import { dismissInviteAutoJoin, getNet } from './networkBridge';
 import { ModalShell } from './uiKit';
 
 const QUALITY_OPTIONS: ReadonlyArray<{ id: GraphicsQuality; label: string }> = [
@@ -20,8 +21,16 @@ export default function PauseModal() {
   const setMouseSensitivity = useGameStore((s) => s.setMouseSensitivity);
   const graphicsQuality = useGameStore((s) => s.graphicsQuality);
   const setGraphicsQuality = useGameStore((s) => s.setGraphicsQuality);
+  const network = useGameStore((s) => s.network);
+  const isGuest = network.mode === 'guest';
 
   const resume = () => dispatch({ type: 'togglePause' });
+
+  const handleLeaveGuestToLobby = () => {
+    dismissInviteAutoJoin();
+    getNet()?.disconnect();
+    dispatch({ type: 'returnToLobby' });
+  };
 
   const handleSensitivity = (value: number) => {
     setMouseSensitivity(value);
@@ -93,23 +102,35 @@ export default function PauseModal() {
           <button type="button" onClick={resume} className="btn-cta h-12 text-lg">
             <Play size={20} /> كمّل الماتش ▶️
           </button>
-          <button
-            type="button"
-            onClick={() => dispatch({ type: 'returnToLobby' })}
-            className="btn-ghost h-11 text-sm"
-          >
-            <Users size={18} className="text-cyan-300" /> غيّر الدور / رجوع للّوبي
-          </button>
+          {isGuest ? (
+            <button
+              type="button"
+              onClick={handleLeaveGuestToLobby}
+              className="btn-ghost h-11 border-rose-400/40 text-sm text-rose-200 hover:bg-rose-500/15"
+            >
+              <LogOut size={18} /> خروج من الروم للّوبي
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => dispatch({ type: 'returnToLobby' })}
+              className="btn-ghost h-11 text-sm"
+            >
+              <Users size={18} className="text-cyan-300" /> غيّر الدور / رجوع للّوبي
+            </button>
+          )}
           <button type="button" onClick={() => setControlsOpen(true)} className="btn-ghost h-11 text-sm">
             <Keyboard size={18} className="text-amber-300" /> دليل التحكم
           </button>
-          <button
-            type="button"
-            onClick={() => dispatch({ type: 'restartMatch' })}
-            className="btn-ghost h-11 border-rose-400/40 text-sm text-rose-200 hover:bg-rose-500/15"
-          >
-            <RotateCcw size={18} /> ابدأ الماتش من الأول 🔄
-          </button>
+          {!isGuest && (
+            <button
+              type="button"
+              onClick={() => dispatch({ type: 'restartMatch' })}
+              className="btn-ghost h-11 border-rose-400/40 text-sm text-rose-200 hover:bg-rose-500/15"
+            >
+              <RotateCcw size={18} /> ابدأ الماتش من الأول 🔄
+            </button>
+          )}
         </div>
       </div>
     </ModalShell>

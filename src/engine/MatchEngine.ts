@@ -203,8 +203,8 @@ export class MatchEngine implements IMatchEngine {
   private running = false;
   private disposed = false;
 
-  // Match simulation state
-  private phase: MatchPhase = 'menu';
+  // Match simulation state (preserve 'lobby' across React StrictMode remounts when ?room= redirected)
+  private phase: MatchPhase = useGameStore.getState().phase === 'lobby' ? 'lobby' : 'menu';
   private isPaused = false;
   private score: Record<TeamId, number> = { red: 0, blue: 0 };
   private clockSec = 180;
@@ -507,7 +507,6 @@ export class MatchEngine implements IMatchEngine {
         this.updateStadiumJumbotron();
         this.syncStoreImmediate();
         this.broadcastLobbySync();
-        this.broadcastWorldSnapshot();
         break;
 
       case 'togglePause':
@@ -4499,6 +4498,12 @@ export class MatchEngine implements IMatchEngine {
     this.humanSlot = { ...packet.guestSlot };
     if (packet.phase === 'lobby' || packet.phase === 'menu') {
       this.isPaused = false;
+      this.isChargingShot = false;
+      this.shotCharge = 0;
+      this.aimCurl = 0;
+      this.guestSnapshotBuffer = [];
+      this.guestTimelineInitialized = false;
+      this.guestHitStopRemaining = 0;
       this.phase = packet.phase;
       this.goalReplayState = { ...INITIAL_GOAL_REPLAY_STATE };
       this.stadium.setVARActive(false);
@@ -4506,6 +4511,10 @@ export class MatchEngine implements IMatchEngine {
       this.hideAimingGuide();
       this.inputManager.exitPointerLock();
       this.activeCamera = packet.guestSlot.cameraMode;
+      this.spawnRoster(packet.rules);
+      this.positionForKickoff();
+      this.ball.reset({ x: 0, y: 0.22, z: 0 });
+      this.updateStadiumJumbotron();
       this.syncStoreImmediate();
     }
   }
@@ -4700,7 +4709,7 @@ export class MatchEngine implements IMatchEngine {
   }
 
   private maybeTickHostSnapshotBroadcast(dt: number): void {
-    if (!this.isHostWithGuest() || this.phase === 'menu') return;
+    if (!this.isHostWithGuest() || this.phase === 'menu' || this.phase === 'lobby') return;
     this.hostSnapshotAccum += dt;
     const interval = 1 / HOST_SNAPSHOT_HZ;
     if (this.hostSnapshotAccum >= interval) {
@@ -4990,6 +4999,29 @@ export class MatchEngine implements IMatchEngine {
     if (snapshot.seq <= this.lastReceivedSnapshotSeq) return;
     this.lastReceivedSnapshotSeq = snapshot.seq;
 
+    // Lobby/Menu state is governed by LobbySyncPacket so role-picker selections are never clobbered
+    if (snapshot.phase === 'lobby' || snapshot.phase === 'menu') return;
+
+    // Detect fresh match start / restartMatch from Host -> flush stale snapshots cleanly
+    const isFreshMatchStart =
+      snapshot.phase === 'kickoff' &&
+      (this.phase === 'lobby' ||
+        this.phase === 'menu' ||
+        this.phase === 'full_time' ||
+        snapshot.clockSec > this.clockSec + 5);
+    if (isFreshMatchStart) {
+      this.guestSnapshotBuffer = [];
+      this.guestTimelineInitialized = false;
+      this.guestHitStopRemaining = 0;
+      this.isPaused = false;
+      this.isChargingShot = false;
+      this.shotCharge = 0;
+      this.aimCurl = 0;
+      this.score = { ...snapshot.score };
+      this.awards = [];
+      store.resetMatchStats();
+    }
+
     // 1. Trigger one-shot events
     if (snapshot.events) {
       for (const ev of snapshot.events) {
@@ -5092,6 +5124,8 @@ export class MatchEngine implements IMatchEngine {
 
     // If no snapshots received yet (e.g. sitting in Lobby), render clean preview backdrop
     if (this.guestSnapshotBuffer.length === 0) {
+      this.humanSlot = { ...store.humanSlot };
+      this.activeCamera = store.activeCamera;
       this.ball.setTrajectoryVisible(false);
       this.hideAimingGuide();
       this.characters.syncPlayers(

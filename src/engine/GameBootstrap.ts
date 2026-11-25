@@ -1,4 +1,5 @@
 import { SoundEngine } from '../audio/SoundEngine';
+import { PeerNetworkManager } from '../network/PeerNetworkManager';
 import { useGameStore } from '../store/useGameStore';
 import { DEFAULT_STADIUM_CONFIG } from '../types/stadium';
 import { AimingGuide3D } from './entities/AimingGuide3D';
@@ -18,16 +19,19 @@ export interface GameBootstrapHandle {
   readonly aimingGuide: AimingGuide3D;
   readonly effects: EffectsManager;
   readonly sound: SoundEngine;
+  readonly network: PeerNetworkManager;
   readonly engine: MatchEngine;
   dispose(): void;
 }
 
 /**
- * Composes and boots the full ElMal3abLife 3D WebGL + Rapier3D runtime, wiring
- * SceneManager, StadiumScene, CharacterSystem, BallPhysics, AimingGuide3D,
- * EffectsManager, SoundEngine, and MatchEngine with React StrictMode-safe teardown.
+ * Composes and boots the full ElMal3abLife 3D WebGL + Rapier3D + PeerJS P2P runtime,
+ * wiring SceneManager, StadiumScene, CharacterSystem, BallPhysics, AimingGuide3D,
+ * EffectsManager, SoundEngine, PeerNetworkManager, and MatchEngine with React StrictMode-safe teardown.
  */
 export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle {
+  const initState = useGameStore.getState();
+
   const sceneManager = new SceneManager(container);
   const stadium = new StadiumScene(DEFAULT_STADIUM_CONFIG);
   const characters = new CharacterSystem();
@@ -35,9 +39,12 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
   const aimingGuide = new AimingGuide3D();
   const effects = new EffectsManager();
   const sound = new SoundEngine();
+  const network = new PeerNetworkManager();
 
-  // Honor any pre-existing mute preference in store
-  sound.setMuted(useGameStore.getState().muted);
+  // Apply initial persisted/default audio & graphics quality tiers across renderer + stadium
+  sound.setMuted(initState.muted);
+  sceneManager.setQuality(initState.graphicsQuality);
+  stadium.setQuality(initState.graphicsQuality);
 
   const scene = sceneManager.getScene();
   const camera = sceneManager.getCamera();
@@ -62,7 +69,9 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
     domElement: canvasEl,
     aimingGuide,
     onRender: () => sceneManager.render(),
+    onQualityChange: (quality) => sceneManager.setQuality(quality),
   });
+  engine.setNetworkManager(network);
 
   let disposed = false;
   let audioUnlocked = false;
@@ -121,6 +130,7 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
     }
 
     engine.dispose();
+    network.dispose();
 
     scene.remove(effects.group);
     scene.remove(aimingGuide.group);
@@ -149,6 +159,7 @@ export function createGameBootstrap(container: HTMLElement): GameBootstrapHandle
     aimingGuide,
     effects,
     sound,
+    network,
     engine,
     dispose,
   };

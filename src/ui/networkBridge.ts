@@ -13,6 +13,39 @@ export function normalizeRoomCode(raw: string): string {
   return body ? `ML3B-${body.slice(0, 4)}` : '';
 }
 
+let inviteDismissed = false;
+let inviteJoinedCode: string | null = null;
+
+/** Reads `?room=ML3B-XXXX` from the current URL if valid (`ML3B-XXXX`), else `''`. */
+export function readInviteRoomCode(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const raw = new URLSearchParams(window.location.search).get('room');
+    if (!raw) return '';
+    const code = normalizeRoomCode(raw);
+    return /^ML3B-[A-Z0-9]{4}$/.test(code) ? code : '';
+  } catch {
+    return '';
+  }
+}
+
+export function isInviteAutoJoinDismissed(): boolean {
+  return inviteDismissed;
+}
+
+export function hasInviteAutoJoined(code: string): boolean {
+  return inviteJoinedCode === code;
+}
+
+export function markInviteAutoJoined(code: string): void {
+  inviteJoinedCode = code;
+}
+
+/** Prevents `?room=` from re-redirecting or re-joining after user manually leaves or disconnects. */
+export function dismissInviteAutoJoin(): void {
+  inviteDismissed = true;
+}
+
 /**
  * Shared voice-chat controls (OnlineRoomPanel + Scoreboard).
  * Voice is OFF and mic is MUTED by default; enabling voice never un-mutes by itself

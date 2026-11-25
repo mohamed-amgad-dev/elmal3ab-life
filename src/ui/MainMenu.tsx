@@ -2,25 +2,25 @@ import { useEffect } from 'react';
 import { Flame, Gamepad2, Globe, Keyboard, Sparkles, Trophy } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import { DEFAULT_HUMAN_SLOT } from '../types/game';
+import { isInviteAutoJoinDismissed, readInviteRoomCode } from './networkBridge';
 import { MuteButton } from './uiKit';
-
-let inviteRedirected = false;
 
 export default function MainMenu() {
   const setPhase = useGameStore((s) => s.setPhase);
+  const networkMode = useGameStore((s) => s.network.mode);
   const setControlsOpen = useGameStore((s) => s.setControlsOpen);
   const applyPreset = useGameStore((s) => s.applyPreset);
   const setHumanSlot = useGameStore((s) => s.setHumanSlot);
   const dispatchCommand = useGameStore((s) => s.dispatchCommand);
 
-  // Invite link (?room=ML3B-XXXX) → jump straight into the lobby where the room panel auto-joins.
+  // Invite link (?room=ML3B-XXXX) → jump straight into the lobby where OnlineRoomPanel auto-joins
+  // (StrictMode-safe: re-evaluates cleanly if transient dev remount occurs before user dismisses).
   useEffect(() => {
-    if (inviteRedirected) return;
-    if (new URLSearchParams(window.location.search).get('room')) {
-      inviteRedirected = true;
+    if (isInviteAutoJoinDismissed() || networkMode !== 'offline') return;
+    if (readInviteRoomCode()) {
       setPhase('lobby');
     }
-  }, [setPhase]);
+  }, [networkMode, setPhase]);
 
   const quickPlay = () => {
     applyPreset('chaos');

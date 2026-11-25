@@ -744,7 +744,9 @@ export class PeerNetworkManager implements INetworkManager {
   }
 
   dispose(): void {
-    this.disconnect();
+    const hadSession = this.session > 0 || this.peer !== null || this.conn !== null;
+    this.session++;
+    this.teardown(hadSession);
     this.guestInputSubs.clear();
     this.snapshotSubs.clear();
     this.lobbySyncSubs.clear();

@@ -1,23 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { Copy, Globe, Link2, LogOut, Mic, MicOff } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
-import { getNet, normalizeRoomCode, useVoiceControls } from './networkBridge';
-
-let autoJoinAttempted = false;
-
-function readRoomParam(): string {
-  try {
-    const raw = new URLSearchParams(window.location.search).get('room');
-    return raw ? normalizeRoomCode(raw) : '';
-  } catch {
-    return '';
-  }
-}
+import {
+  dismissInviteAutoJoin,
+  getNet,
+  hasInviteAutoJoined,
+  isInviteAutoJoinDismissed,
+  markInviteAutoJoined,
+  normalizeRoomCode,
+  readInviteRoomCode,
+  useVoiceControls,
+} from './networkBridge';
 
 export default function OnlineRoomPanel() {
   const network = useGameStore((s) => s.network);
   const voice = useVoiceControls();
-  const [joinCode, setJoinCode] = useState(() => readRoomParam());
+  const [joinCode, setJoinCode] = useState(() => readInviteRoomCode());
   const [copied, setCopied] = useState<'code' | 'link' | null>(null);
   const copyTimer = useRef<number | undefined>(undefined);
 
@@ -26,33 +24,47 @@ export default function OnlineRoomPanel() {
     network.status === 'creating' || network.status === 'connecting';
   const codeReady = /^ML3B-[A-Z0-9]{4}$/.test(joinCode);
 
-  // Invite link (?room=ML3B-XXXX): auto-join once when the runtime network manager is ready.
+  // Invite link (?room=ML3B-XXXX): StrictMode-safe deferred auto-join once the surviving
+  // PeerNetworkManager is mounted and live.
   useEffect(() => {
-    if (autoJoinAttempted) return;
-    const code = readRoomParam();
-    if (!code) return;
+    const code = readInviteRoomCode();
+    if (!code || isInviteAutoJoinDismissed() || hasInviteAutoJoined(code)) return;
 
-    const tryAutoJoin = () => {
-      if (autoJoinAttempted) return true;
-      const state = useGameStore.getState().network;
-      const net = getNet();
-      if (!net) return false;
-      autoJoinAttempted = true;
-      if (state.mode === 'offline' && state.status === 'idle') {
-        void net.joinRoom(code).catch(() => undefined);
+    let cancelled = false;
+    let pollTimer: number | undefined;
+
+    const startDelay = window.setTimeout(() => {
+      if (cancelled) return;
+
+      const tryAutoJoin = (): boolean => {
+        if (cancelled || isInviteAutoJoinDismissed() || hasInviteAutoJoined(code)) return true;
+        const net = getNet();
+        if (!net) return false;
+        const state = useGameStore.getState().network;
+        markInviteAutoJoined(code);
+        if (state.mode === 'offline' && state.status === 'idle') {
+          void net.joinRoom(code).catch(() => undefined);
+        }
+        return true;
+      };
+
+      if (tryAutoJoin()) return;
+      let attempts = 0;
+      pollTimer = window.setInterval(() => {
+        attempts += 1;
+        if (tryAutoJoin() || attempts >= 30) {
+          window.clearInterval(pollTimer);
+        }
+      }, 100);
+    }, 65);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(startDelay);
+      if (pollTimer !== undefined) {
+        window.clearInterval(pollTimer);
       }
-      return true;
     };
-
-    if (tryAutoJoin()) return;
-    let attempts = 0;
-    const timer = window.setInterval(() => {
-      attempts += 1;
-      if (tryAutoJoin() || attempts >= 30) {
-        window.clearInterval(timer);
-      }
-    }, 100);
-    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
@@ -268,7 +280,10 @@ export default function OnlineRoomPanel() {
 
           <button
             type="button"
-            onClick={() => getNet()?.disconnect()}
+            onClick={() => {
+              dismissInviteAutoJoin();
+              getNet()?.disconnect();
+            }}
             className="btn-ghost h-9 gap-1.5 border-rose-400/40 text-xs font-black text-rose-200 hover:bg-rose-500/15"
           >
             <LogOut size={14} />

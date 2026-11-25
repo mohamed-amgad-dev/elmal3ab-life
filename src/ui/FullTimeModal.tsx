@@ -1,11 +1,20 @@
-import { Home, RotateCcw, Trophy } from 'lucide-react';
+import { Home, LogOut, RotateCcw, Trophy } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
+import { dismissInviteAutoJoin, getNet } from './networkBridge';
 import { ModalShell, TEAM_HEX, TEAM_NAMES } from './uiKit';
 
 export default function FullTimeModal() {
   const score = useGameStore((s) => s.score);
   const awards = useGameStore((s) => s.awards);
+  const network = useGameStore((s) => s.network);
   const dispatch = useGameStore((s) => s.dispatchCommand);
+  const isGuest = network.mode === 'guest';
+
+  const handleGuestLeaveRoom = () => {
+    dismissInviteAutoJoin();
+    getNet()?.disconnect();
+    dispatch({ type: 'returnToLobby' });
+  };
 
   const draw = score.red === score.blue;
   const winner = score.red > score.blue ? 'red' : 'blue';
@@ -77,21 +86,40 @@ export default function FullTimeModal() {
           )}
         </div>
 
-        <div className="relative mt-6 flex items-center justify-center gap-3">
-          <button
-            type="button"
-            onClick={() => dispatch({ type: 'restartMatch' })}
-            className="btn-cta h-14 px-8 text-xl"
-          >
-            <RotateCcw size={22} /> ماتش كمان! 🔄
-          </button>
-          <button
-            type="button"
-            onClick={() => dispatch({ type: 'returnToLobby' })}
-            className="btn-ghost h-14 gap-2 px-6 text-base"
-          >
-            <Home size={20} /> رجوع للّوبي 🏟️
-          </button>
+        <div className="relative mt-6 flex flex-wrap items-center justify-center gap-3">
+          {isGuest ? (
+            <>
+              {network.peerConnected && (
+                <div className="flex h-14 items-center justify-center rounded-2xl border border-violet-300/50 bg-violet-500/15 px-6 text-base font-black text-violet-100">
+                  مستني الهوست يبدأ ماتش جديد أو يرجع للّوبي... ⏳
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={handleGuestLeaveRoom}
+                className="btn-ghost h-14 gap-2 border-rose-400/40 px-6 text-base text-rose-200 hover:bg-rose-500/15"
+              >
+                <LogOut size={20} /> خروج من الروم 🚪
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => dispatch({ type: 'restartMatch' })}
+                className="btn-cta h-14 px-8 text-xl"
+              >
+                <RotateCcw size={22} /> ماتش كمان! 🔄
+              </button>
+              <button
+                type="button"
+                onClick={() => dispatch({ type: 'returnToLobby' })}
+                className="btn-ghost h-14 gap-2 px-6 text-base"
+              >
+                <Home size={20} /> رجوع للّوبي 🏟️
+              </button>
+            </>
+          )}
         </div>
       </div>
     </ModalShell>
