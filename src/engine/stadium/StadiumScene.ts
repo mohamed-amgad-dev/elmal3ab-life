@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import type { IStadiumScene } from '../../types/engine';
-import type { TeamId, Vec3 } from '../../types/game';
+import type { IStadiumScene, JumbotronUpdateState } from '../../types/engine';
+import type { GraphicsQuality, TeamId, Vec3 } from '../../types/game';
 import {
   DEFAULT_STADIUM_CONFIG,
   type StadiumConfig,
@@ -9,6 +9,7 @@ import { NightLighting } from '../lighting/NightLighting';
 import { DugoutAndVAR } from './DugoutAndVAR';
 import { GoalNet } from './GoalNet';
 import { PitchBuilder } from './PitchBuilder';
+import { StadiumJumbotron } from './StadiumJumbotron';
 import { StandsAndCrowd } from './StandsAndCrowd';
 
 interface FireworkRocket {
@@ -46,6 +47,8 @@ export class StadiumScene implements IStadiumScene {
   private goals: GoalNet;
   private standsAndCrowd: StandsAndCrowd;
   private dugoutAndVAR: DugoutAndVAR;
+  private jumbotron: StadiumJumbotron;
+  private cachedShadowDefaults = false;
 
   private celebrationTeam: TeamId | null = null;
   private celebrationTimer = 0;
@@ -72,13 +75,15 @@ export class StadiumScene implements IStadiumScene {
     this.goals = new GoalNet(this.config);
     this.standsAndCrowd = new StandsAndCrowd(this.config);
     this.dugoutAndVAR = new DugoutAndVAR(this.config);
+    this.jumbotron = new StadiumJumbotron(this.config);
 
     this.group.add(
       this.lighting.group,
       this.pitch.group,
       this.goals.group,
       this.standsAndCrowd.group,
-      this.dugoutAndVAR.group
+      this.dugoutAndVAR.group,
+      this.jumbotron.group
     );
 
     this.initFireworksSystem();
@@ -217,6 +222,7 @@ export class StadiumScene implements IStadiumScene {
     this.celebrationTimer = 4.2;
     this.nextSalvoTimer = 0.55;
     this.standsAndCrowd.setCrowdExcitement(1.0);
+    this.jumbotron.triggerGoalFlash(scoringTeam);
 
     const primaryHex =
       scoringTeam === 'red'
@@ -306,6 +312,41 @@ export class StadiumScene implements IStadiumScene {
 
   public setVARActive(active: boolean): void {
     this.dugoutAndVAR.setVARActive(active);
+    this.jumbotron.setVARActive(active);
+  }
+
+  public updateJumbotron(state: JumbotronUpdateState): void {
+    this.jumbotron.updateState(state);
+  }
+
+  public setQuality(quality: GraphicsQuality): void {
+    // Snapshot initial castShadow flags once so returning from 'low' -> 'high' restores them cleanly
+    if (!this.cachedShadowDefaults) {
+      this.group.traverse((obj) => {
+        if ((obj as THREE.Light).isLight || (obj as THREE.Mesh).isMesh) {
+          obj.userData.defaultCastShadow = obj.castShadow;
+        }
+      });
+      this.cachedShadowDefaults = true;
+    }
+
+    const volumetricObj = this.lighting.group.getObjectByName('VolumetricLights');
+    if (volumetricObj) {
+      volumetricObj.visible = quality !== 'low';
+    }
+
+    this.group.traverse((obj) => {
+      if ((obj as THREE.SpotLight).isSpotLight) {
+        const defaultCast = Boolean(obj.userData.defaultCastShadow);
+        // High: diagonal tower SpotLights cast shadows; Medium & Low: disable SpotLight shadow passes
+        obj.castShadow = quality === 'high' ? defaultCast : false;
+      } else if ((obj as THREE.DirectionalLight).isDirectionalLight) {
+        const defaultCast = Boolean(obj.userData.defaultCastShadow);
+        obj.castShadow = quality === 'low' ? false : defaultCast;
+      } else if ((obj as THREE.Mesh).isMesh && obj.userData.defaultCastShadow !== undefined) {
+        obj.castShadow = quality === 'low' ? false : Boolean(obj.userData.defaultCastShadow);
+      }
+    });
   }
 
   public getBenchSeatPosition(team: TeamId, slotIndex: number): Vec3 {
@@ -361,6 +402,7 @@ export class StadiumScene implements IStadiumScene {
       this.celebrationTimer
     );
     this.dugoutAndVAR.update(clampedDt, elapsed);
+    this.jumbotron.update(clampedDt, elapsed);
     this.updateFireworks(clampedDt);
   }
 
@@ -446,6 +488,7 @@ export class StadiumScene implements IStadiumScene {
     this.goals.dispose();
     this.standsAndCrowd.dispose();
     this.dugoutAndVAR.dispose();
+    this.jumbotron.dispose();
     this.sparkGeometry.dispose();
     this.sparkMaterial.dispose();
     this.sparkTexture.dispose();

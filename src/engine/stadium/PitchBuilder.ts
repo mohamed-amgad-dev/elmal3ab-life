@@ -67,15 +67,19 @@ export class PitchBuilder {
     const totalL = this.config.pitchLength + margin * 2; // 75m
 
     const pitchTexture = this.createProceduralPitchTexture(totalW, totalL);
-    this.textures.push(pitchTexture);
+    const { normalMap, roughnessMap } = this.createProceduralTurfPBRMaps(totalW, totalL);
+    this.textures.push(pitchTexture, normalMap, roughnessMap);
 
     const pitchGeo = new THREE.PlaneGeometry(totalW, totalL, 1, 1);
     pitchGeo.rotateX(-Math.PI / 2);
 
     const pitchMat = new THREE.MeshStandardMaterial({
       map: pitchTexture,
-      roughness: 0.78,
-      metalness: 0.04,
+      normalMap,
+      normalScale: new THREE.Vector2(0.65, 0.65),
+      roughnessMap,
+      roughness: 1.0,
+      metalness: 0.05,
     });
 
     const pitchMesh = new THREE.Mesh(pitchGeo, pitchMat);
@@ -86,6 +90,108 @@ export class PitchBuilder {
 
     this.geometries.push(pitchGeo);
     this.materials.push(pitchMat);
+  }
+
+  /**
+   * Generates high-detail procedural PBR `normalMap` (fine grass blade micro-normals
+   * + directional mowing stripe grain) and `roughnessMap` (subtle night-dew specular
+   * variation under stadium floodlights) aligned 1:1 with the pitch turf.
+   */
+  private createProceduralTurfPBRMaps(
+    totalW: number,
+    totalL: number
+  ): { normalMap: THREE.CanvasTexture; roughnessMap: THREE.CanvasTexture } {
+    const w = 512;
+    const h = 768;
+
+    const normalCanvas = document.createElement('canvas');
+    normalCanvas.width = w;
+    normalCanvas.height = h;
+    const nCtx = normalCanvas.getContext('2d')!;
+    const nImg = nCtx.createImageData(w, h);
+    const nData = nImg.data;
+
+    const roughCanvas = document.createElement('canvas');
+    roughCanvas.width = w;
+    roughCanvas.height = h;
+    const rCtx = roughCanvas.getContext('2d')!;
+    const rImg = rCtx.createImageData(w, h);
+    const rData = rImg.data;
+
+    const hl = this.config.halfLength;
+    const hw = this.config.halfWidth;
+    const numStripes = 18;
+    const stripeLength = this.config.pitchLength / numStripes;
+
+    // Fast deterministic spatial hash for blade micro-detail (no Math.random overhead)
+    const hash2 = (x: number, y: number): number => {
+      let n = Math.imul(x, 374761393) ^ Math.imul(y, 668265263);
+      n = Math.imul(n ^ (n >>> 13), 1274126177);
+      return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+    };
+
+    for (let py = 0; py < h; py++) {
+      const v = py / h;
+      const wz = (v - 0.5) * totalL;
+      const inPitchZ = Math.abs(wz) <= hl + 0.5;
+      const stripeIdx = Math.floor((wz + hl) / stripeLength);
+      const isEvenStripe = ((stripeIdx % 2) + 2) % 2 === 0;
+      // Alternating roller mow lean along Z gives real stadium stripe reflection shifts
+      const stripeBiasY = inPitchZ ? (isEvenStripe ? 0.14 : -0.14) : 0;
+      const stripeRoughBase = inPitchZ ? (isEvenStripe ? 0.68 : 0.78) : 0.86;
+
+      for (let px = 0; px < w; px++) {
+        const u = px / w;
+        const wx = (u - 0.5) * totalW;
+        const idx = (py * w + px) * 4;
+
+        // Multi-scale grass blade normal perturbation
+        const h1 = hash2(px, py) * 2 - 1;
+        const h2 = hash2(px >> 1, py >> 1) * 2 - 1;
+        // Subtle mowing roller micro-grooves along X
+        const mowGroove = Math.sin(py * 0.85) * 0.08;
+        const nx = h1 * 0.34 + h2 * 0.14;
+        const ny = h2 * 0.28 + stripeBiasY + mowGroove;
+        const nz = Math.sqrt(Math.max(0.15, 1 - nx * nx - ny * ny));
+
+        nData[idx] = Math.max(0, Math.min(255, Math.round((nx * 0.5 + 0.5) * 255)));
+        nData[idx + 1] = Math.max(0, Math.min(255, Math.round((ny * 0.5 + 0.5) * 255)));
+        nData[idx + 2] = Math.max(0, Math.min(255, Math.round((nz * 0.5 + 0.5) * 255)));
+        nData[idx + 3] = 255;
+
+        // Night-dew specular variation: smooth organic dew patches + fine blade sparkle
+        const dewWave =
+          Math.sin(wx * 0.22 + wz * 0.14) * Math.cos(wx * 0.13 - wz * 0.19) * 0.5 +
+          Math.sin(wx * 0.45 - wz * 0.31) * 0.25;
+        const inPitchX = Math.abs(wx) <= hw + 0.5;
+        const wearCenter =
+          inPitchX && inPitchZ
+            ? Math.exp(-(wx * wx + wz * wz) / 95) * 0.05
+            : 0;
+        const rawRough =
+          stripeRoughBase - dewWave * 0.11 + h1 * 0.065 + wearCenter;
+        const clampedRough = Math.max(0.46, Math.min(0.94, rawRough));
+        const rByte = Math.round(clampedRough * 255);
+
+        rData[idx] = rByte;
+        rData[idx + 1] = rByte;
+        rData[idx + 2] = rByte;
+        rData[idx + 3] = 255;
+      }
+    }
+
+    nCtx.putImageData(nImg, 0, 0);
+    rCtx.putImageData(rImg, 0, 0);
+
+    const normalMap = new THREE.CanvasTexture(normalCanvas);
+    normalMap.anisotropy = 8;
+    normalMap.needsUpdate = true;
+
+    const roughnessMap = new THREE.CanvasTexture(roughCanvas);
+    roughnessMap.anisotropy = 8;
+    roughnessMap.needsUpdate = true;
+
+    return { normalMap, roughnessMap };
   }
 
   private createProceduralPitchTexture(

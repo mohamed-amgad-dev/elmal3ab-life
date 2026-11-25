@@ -3,6 +3,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import type { GraphicsQuality } from '../types/game';
 
 export class SceneManager {
   private scene: THREE.Scene;
@@ -14,6 +15,9 @@ export class SceneManager {
   private container: HTMLElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private boundWindowResize: () => void;
+  private currentQuality: GraphicsQuality = 'high';
+  private maxDpr = 2;
+  private bypassComposer = false;
   private disposed = false;
 
   constructor(container?: HTMLElement) {
@@ -168,7 +172,7 @@ export class SceneManager {
     const height = Math.max(1, Math.floor(h ?? fallbackH));
     const dpr =
       typeof window !== 'undefined'
-        ? Math.min(window.devicePixelRatio || 1, 2)
+        ? Math.min(window.devicePixelRatio || 1, this.maxDpr)
         : 1;
 
     this.camera.aspect = width / height;
@@ -186,10 +190,45 @@ export class SceneManager {
     }
   }
 
+  public setQuality(quality: GraphicsQuality): void {
+    if (this.disposed) return;
+    this.currentQuality = quality;
+
+    if (quality === 'high') {
+      this.maxDpr = 2;
+      this.bypassComposer = false;
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.needsUpdate = true;
+      if (this.bloomPass) {
+        this.bloomPass.strength = 0.62;
+      }
+    } else if (quality === 'medium') {
+      this.maxDpr = 1.35;
+      this.bypassComposer = false;
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.needsUpdate = true;
+      if (this.bloomPass) {
+        this.bloomPass.strength = 0.42;
+      }
+    } else {
+      // 'low': DPR 1, shadows off, bypass composer/bloom completely for max FPS
+      this.maxDpr = 1;
+      this.bypassComposer = true;
+      this.renderer.shadowMap.enabled = false;
+      this.renderer.shadowMap.needsUpdate = true;
+    }
+
+    this.resize();
+  }
+
+  public getQuality(): GraphicsQuality {
+    return this.currentQuality;
+  }
+
   public render(): void {
     if (this.disposed) return;
 
-    if (this.composer) {
+    if (!this.bypassComposer && this.composer) {
       try {
         this.composer.render();
         return;
