@@ -1,10 +1,19 @@
 import { commandBus } from '../CommandBus';
 import { useGameStore } from '../../store/useGameStore';
+import {
+  DEFAULT_MOUSE_SENSITIVITY,
+  LOB_HOLD_THRESHOLD_MS,
+  MAX_MOUSE_SENSITIVITY,
+  MIN_MOUSE_SENSITIVITY,
+  QUICK_CHAT_PHRASES,
+} from '../../types/game';
 
 export interface InputManagerOptions {
   domElement?: HTMLElement | null;
   onUserGesture?: () => void;
 }
+
+const LOB_AUTO_RELEASE_MS = 500;
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
@@ -22,10 +31,23 @@ function isInteractiveUIElement(target: EventTarget | null): boolean {
   return Boolean(target.closest('button, a, input, select, textarea, [role="button"]'));
 }
 
+function getQuickChatDigitIndex(code: string): number {
+  if (code.startsWith('Digit')) {
+    const n = Number(code.slice(5));
+    if (n >= 1 && n <= 8) return n - 1;
+  }
+  if (code.startsWith('Numpad')) {
+    const n = Number(code.slice(6));
+    if (n >= 1 && n <= 8) return n - 1;
+  }
+  return -1;
+}
+
 /**
  * Keyboard + mouse controller emitting typed GameCommands via `commandBus`
- * with Rematch-style Pointer Lock 360° camera look, LMB Shoot / RMB Pass,
- * broadcast NDC raycast coords, and seamless unlocked mouse fallback.
+ * with Rematch-style Pointer Lock 360° camera look (scaled by mouseSensitivity),
+ * LMB Shoot / RMB Pass, Space tap-pass vs hold-lobPass, Shift knock-on burst,
+ * KeyB Quick-Chat wheel, goal-replay skip, and seamless unlocked mouse fallback.
  */
 export class InputManager {
   private readonly keysDown = new Set<string>();
@@ -34,6 +56,10 @@ export class InputManager {
 
   private sprintActive = false;
   private isChargingShot = false;
+
+  // Space hold tracking for outfield Rematch tap-pass (<180ms) vs curved lobPass (>=180ms..500ms)
+  private spaceHoldStartMs: number | null = null;
+  private spaceHoldAutoTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Unbounded free-mouse 360 yaw & clamped pitch for player_third & referee_cam
   private freeYaw = 0;
@@ -142,12 +168,49 @@ export class InputManager {
     }
   }
 
+  private cancelSpaceHold(): void {
+    this.spaceHoldStartMs = null;
+    if (this.spaceHoldAutoTimer !== null) {
+      clearTimeout(this.spaceHoldAutoTimer);
+      this.spaceHoldAutoTimer = null;
+    }
+  }
+
+  private finishSpaceHold(autoReleased: boolean): void {
+    if (this.spaceHoldStartMs === null) return;
+    const heldMs = autoReleased
+      ? LOB_AUTO_RELEASE_MS
+      : Math.max(0, performance.now() - this.spaceHoldStartMs);
+    this.cancelSpaceHold();
+
+    if (this.disposed) return;
+    const store = useGameStore.getState();
+    if (store.isPaused || !this.isGameplayPhase() || store.phase === 'goal_replay') {
+      return;
+    }
+
+    const { humanSlot } = store;
+    if (humanSlot.isBenched || humanSlot.role !== 'outfield') {
+      return;
+    }
+
+    if (heldMs < LOB_HOLD_THRESHOLD_MS) {
+      commandBus.emit({ type: 'pass' });
+    } else {
+      const denom = Math.max(1, LOB_AUTO_RELEASE_MS - LOB_HOLD_THRESHOLD_MS);
+      const holdRatio = clamp((heldMs - LOB_HOLD_THRESHOLD_MS) / denom, 0, 1);
+      commandBus.emit({ type: 'lobPass', holdRatio });
+    }
+  }
+
   private tryRequestPointerLock(target: EventTarget | null): void {
     const store = useGameStore.getState();
     const cam = store.activeCamera;
     const lockEligible =
       cam === 'player_third' || cam === 'gk_first_person' || cam === 'referee_cam';
-    if (!lockEligible || store.isPaused || store.isControlsOpen) return;
+    if (!lockEligible || store.isPaused || store.isControlsOpen || store.isQuickChatOpen) {
+      return;
+    }
     if (store.phase !== 'playing' && store.phase !== 'kickoff' && store.phase !== 'penalty_setup') {
       return;
     }
@@ -187,11 +250,12 @@ export class InputManager {
   }
 
   /**
-   * Primary action (Right Click / Space):
-   * - Outfield: Crisp Pass / Tackle
-   * - Goalkeeper: Space = Directional Dive Save, RMB = Throw / Punt
+   * Primary action (Right Click / instant non-outfield Space):
+   * - Outfield: Crisp instant Pass / Tackle (RMB)
+   * - Goalkeeper: Space = Directional Dive Save (zero delay), RMB = Throw / Punt
    * - Referee: Whistle
    * - Spectator: Space = Cheer, RMB = Fireworks
+   * - Bench: Rage emote
    */
   private triggerPassOrPrimary(fromRightMouse = false): void {
     const { humanSlot } = useGameStore.getState();
@@ -228,9 +292,9 @@ export class InputManager {
   /**
    * Shoot / Secondary start (Left Click / E):
    * - Outfield: Start charging precision shot
-   * - Goalkeeper (E / RMB): Throw / Punt
+   * - Goalkeeper (E): Throw / Punt
    * - Goalkeeper (LMB): Dive save
-   * - Spectator: Fireworks
+   * - Spectator: Cheer / Fireworks
    */
   private triggerShootStart(fromLeftMouse: boolean): void {
     const { humanSlot } = useGameStore.getState();
@@ -283,9 +347,13 @@ export class InputManager {
 
     const store = useGameStore.getState();
 
-    // Escape / P closes Controls modal or toggles Pause during a match.
+    // Escape closes Quick-Chat first, then Controls modal, or toggles Pause during a match.
     // Guard against double-triggering Pause on the same Escape press that exited Pointer Lock.
     if (e.code === 'Escape' || (e.code === 'KeyP' && !e.repeat)) {
+      if (e.code === 'Escape' && store.isQuickChatOpen) {
+        store.setQuickChatOpen(false);
+        return;
+      }
       if (e.code === 'Escape' && performance.now() - this.lastPointerUnlockMs < 260) {
         return;
       }
@@ -294,6 +362,7 @@ export class InputManager {
         return;
       }
       if (this.isGameplayPhase()) {
+        this.cancelSpaceHold();
         this.exitPointerLock();
         commandBus.emit({ type: 'togglePause' });
       }
@@ -313,7 +382,7 @@ export class InputManager {
       e.preventDefault();
     }
 
-    const isRepeat = this.keysDown.has(e.code);
+    const isRepeat = this.keysDown.has(e.code) || e.repeat;
     this.keysDown.add(e.code);
 
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
@@ -321,16 +390,60 @@ export class InputManager {
         this.sprintActive = true;
         commandBus.emit({ type: 'sprint', active: true });
       }
+      if (!isRepeat && !store.isPaused) {
+        const { humanSlot } = store;
+        const move = this.getMoveVector();
+        if (
+          !humanSlot.isBenched &&
+          humanSlot.role === 'outfield' &&
+          Math.hypot(move.dx, move.dz) > 0.05
+        ) {
+          commandBus.emit({ type: 'knockOn' });
+        }
+      }
       return;
     }
 
     if (isRepeat || store.isPaused) return;
 
+    // Quick-Chat wheel toggle (`KeyB`)
+    if (e.code === 'KeyB') {
+      store.setQuickChatOpen(!store.isQuickChatOpen);
+      return;
+    }
+
+    // When Quick-Chat wheel is open, Digit1..Digit8 emit the selected phrase and close the wheel
+    if (store.isQuickChatOpen) {
+      const phraseIdx = getQuickChatDigitIndex(e.code);
+      if (phraseIdx >= 0 && phraseIdx < QUICK_CHAT_PHRASES.length) {
+        store.setQuickChatOpen(false);
+        commandBus.emit({
+          type: 'quickChat',
+          phraseId: QUICK_CHAT_PHRASES[phraseIdx].id,
+        });
+        return;
+      }
+    }
+
     const { humanSlot } = store;
 
     switch (e.code) {
       case 'Space':
-        this.triggerPassOrPrimary();
+        if (store.phase === 'goal_replay') {
+          this.cancelSpaceHold();
+          commandBus.emit({ type: 'skipGoalReplay' });
+          break;
+        }
+        if (!humanSlot.isBenched && humanSlot.role === 'outfield') {
+          this.cancelSpaceHold();
+          this.spaceHoldStartMs = performance.now();
+          this.spaceHoldAutoTimer = setTimeout(() => {
+            this.finishSpaceHold(true);
+          }, LOB_AUTO_RELEASE_MS);
+        } else {
+          // Instant zero-delay reflex trigger for GK dive, Referee whistle, Spectator cheer, Bench emote
+          this.triggerPassOrPrimary(false);
+        }
         break;
 
       case 'KeyE':
@@ -432,6 +545,10 @@ export class InputManager {
       }
     }
 
+    if (e.code === 'Space') {
+      this.finishSpaceHold(false);
+    }
+
     if (e.code === 'KeyE') {
       this.triggerShootEnd();
     }
@@ -459,10 +576,15 @@ export class InputManager {
 
     const store = useGameStore.getState();
     const cam = store.activeCamera;
+    const sens = clamp(
+      store.mouseSensitivity ?? DEFAULT_MOUSE_SENSITIVITY,
+      MIN_MOUSE_SENSITIVITY,
+      MAX_MOUSE_SENSITIVITY,
+    );
 
     if (this.pointerLocked) {
-      const yawSens = 0.0036;
-      const pitchSens = 0.0026;
+      const yawSens = 0.0036 * sens;
+      const pitchSens = 0.0026 * sens;
       this.freeYaw -= dxMove * yawSens;
       this.freePitch = clamp(this.freePitch - dyMove * pitchSens, -0.22, 0.52);
 
@@ -470,7 +592,7 @@ export class InputManager {
       this.mousePitch = clamp(this.mousePitch - dyMove * pitchSens, -0.45, 0.45);
 
       if (this.isChargingShot) {
-        this.curlDeltaAccum = clamp(this.curlDeltaAccum + dxMove * 0.012, -1, 1);
+        this.curlDeltaAccum = clamp(this.curlDeltaAccum + dxMove * 0.012 * sens, -1, 1);
       }
     } else {
       // Unlocked fallback:
@@ -487,10 +609,10 @@ export class InputManager {
         Math.abs(dxMove) < 120 &&
         Math.abs(dyMove) < 120
       ) {
-        this.freeYaw -= dxMove * 0.0028;
-        this.freePitch = clamp(this.freePitch - dyMove * 0.0020, -0.22, 0.52);
+        this.freeYaw -= dxMove * 0.0028 * sens;
+        this.freePitch = clamp(this.freePitch - dyMove * 0.0020 * sens, -0.22, 0.52);
         if (this.isChargingShot) {
-          this.curlDeltaAccum = clamp(this.curlDeltaAccum + dxMove * 0.012, -1, 1);
+          this.curlDeltaAccum = clamp(this.curlDeltaAccum + dxMove * 0.012 * sens, -1, 1);
         }
       }
     }
@@ -501,10 +623,18 @@ export class InputManager {
     this.onUserGesture?.();
 
     if (!this.isGameplayPhase()) return;
-    if (useGameStore.getState().isPaused) return;
+    const store = useGameStore.getState();
+    if (store.isPaused) return;
     if (isInteractiveUIElement(e.target)) return;
     if (this.domElement && e.target instanceof Node && !this.domElement.contains(e.target)) {
       if (!(e.target instanceof HTMLCanvasElement)) return;
+    }
+
+    if (store.phase === 'goal_replay') {
+      if (e.button === 0 || e.button === 2) {
+        commandBus.emit({ type: 'skipGoalReplay' });
+      }
+      return;
     }
 
     // Engage Rematch-style fast Pointer Lock on canvas click
@@ -514,7 +644,7 @@ export class InputManager {
       // Left Click = Shoot (start charge & release on mouseup)
       this.triggerShootStart(true);
     } else if (e.button === 2) {
-      // Right Click = Pass / Tackle (or GK throw)
+      // Right Click = crisp instant Pass / Tackle (or GK throw)
       this.triggerPassOrPrimary(true);
     }
   };
@@ -535,6 +665,7 @@ export class InputManager {
 
   private readonly handleBlur = (): void => {
     this.keysDown.clear();
+    this.cancelSpaceHold();
     if (this.sprintActive) {
       this.sprintActive = false;
       commandBus.emit({ type: 'sprint', active: false });
@@ -545,6 +676,7 @@ export class InputManager {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.cancelSpaceHold();
     this.exitPointerLock();
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
