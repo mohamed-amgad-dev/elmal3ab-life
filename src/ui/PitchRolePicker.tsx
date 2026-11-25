@@ -32,10 +32,10 @@ interface SlotDef {
 
 // Red defends the right goal (RTL reading order), Blue the left.
 const PITCH_SLOTS: SlotDef[] = [
-  { key: 'red-gk', team: 'red', role: 'goalkeeper', emoji: '🧤', label: 'حارس مرمى', at: { left: 91, top: 50 } },
+  { key: 'red-gk', team: 'red', role: 'goalkeeper', emoji: '🧤', label: 'حارس مرمى', at: { left: 87.5, top: 50 } },
   { key: 'red-def', team: 'red', role: 'outfield', pos: 'defender', emoji: '🛡️', label: 'مدافع', at: { left: 74, top: 26 } },
   { key: 'red-st', team: 'red', role: 'outfield', pos: 'striker', emoji: '⚽', label: 'مهاجم', at: { left: 64, top: 74 } },
-  { key: 'blue-gk', team: 'blue', role: 'goalkeeper', emoji: '🧤', label: 'حارس مرمى', at: { left: 9, top: 50 } },
+  { key: 'blue-gk', team: 'blue', role: 'goalkeeper', emoji: '🧤', label: 'حارس مرمى', at: { left: 12.5, top: 50 } },
   { key: 'blue-def', team: 'blue', role: 'outfield', pos: 'defender', emoji: '🛡️', label: 'مدافع', at: { left: 26, top: 74 } },
   { key: 'blue-st', team: 'blue', role: 'outfield', pos: 'striker', emoji: '⚽', label: 'مهاجم', at: { left: 36, top: 26 } },
   { key: 'ref', team: 'red', role: 'referee', emoji: '🟨', label: 'الحكم', at: { left: 50, top: 50 } },
@@ -300,8 +300,8 @@ export default function PitchRolePicker() {
                 onSelect={() => pickSlot(d)}
                 note={
                   d.role === 'goalkeeper' ? (
-                    <span className="flex items-center gap-1 rounded-full bg-amber-400 px-1.5 py-0.5 text-[9px] leading-none font-black whitespace-nowrap text-slate-900">
-                      <Lock size={9} /> منظور شخصي فقط 🧤
+                    <span className="flex items-center gap-0.5 rounded-full bg-amber-400 px-1 py-0.5 text-[8px] leading-none font-black whitespace-nowrap text-slate-900">
+                      <Lock size={8} /> منظور شخصي فقط 🧤
                     </span>
                   ) : avail.disabled && avail.reason && isGuest ? (
                     <span className="rounded-full bg-rose-950/90 px-1.5 py-0.5 text-[9px] leading-none font-black whitespace-nowrap text-rose-200 border border-rose-400/50">

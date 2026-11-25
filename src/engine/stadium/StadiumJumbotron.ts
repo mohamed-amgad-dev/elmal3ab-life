@@ -5,14 +5,15 @@ import type { StadiumConfig } from '../../types/stadium';
 
 const JUMBOTRON_W = 15.6;
 const JUMBOTRON_H = 7.4;
-const JUMBOTRON_Y = 17.5;
-const JUMBOTRON_Z = 43.0;
+const JUMBOTRON_Y = 12.6;
+const JUMBOTRON_Z = 39.5;
+const JUMBOTRON_TILT_X = 0.14;
 
 /**
  * Twin suspended 3D LED Jumbotron scoreboards mounted above the North and South stands
- * (`Z = ±43, Y = 17.5`, facing the pitch). Renders a crisp `CanvasTexture` broadcast
- * scoreboard with dirty-checking so the canvas only redraws when score, whole-second
- * clock, headline, or VAR status changes.
+ * (`Z = ±39.5, Y = 12.6`, tilted slightly downward toward the pitch for crisp `player_third`
+ * visibility). Renders a `CanvasTexture` broadcast scoreboard with dirty-checking so the canvas
+ * only redraws when score, whole-second clock, headline, or VAR status changes.
  */
 export class StadiumJumbotron {
   public readonly group: THREE.Group;
@@ -71,6 +72,11 @@ export class StadiumJumbotron {
     unit.position.set(0, JUMBOTRON_Y, zPos);
     unit.rotation.y = rotY;
 
+    // Tilted display head (~0.14 rad downward toward pitch center) while pylons stay vertical
+    const head = new THREE.Group();
+    head.rotation.x = JUMBOTRON_TILT_X;
+    unit.add(head);
+
     const steelMat = new THREE.MeshStandardMaterial({
       color: 0x111827,
       roughness: 0.42,
@@ -109,14 +115,14 @@ export class StadiumJumbotron {
     const cabinetGeo = new THREE.BoxGeometry(JUMBOTRON_W + 0.9, JUMBOTRON_H + 0.9, 1.35);
     const cabinet = new THREE.Mesh(cabinetGeo, steelMat);
     cabinet.position.z = -0.72;
-    unit.add(cabinet);
+    head.add(cabinet);
     this.geometries.push(cabinetGeo);
 
     // Front glowing LED screen plane facing pitch (+Z in local space)
     const screenGeo = new THREE.PlaneGeometry(JUMBOTRON_W, JUMBOTRON_H);
     const screen = new THREE.Mesh(screenGeo, screenMat);
     screen.position.z = 0.02;
-    unit.add(screen);
+    head.add(screen);
     this.geometries.push(screenGeo);
 
     // Glowing neon bezel bars (top, bottom, left, right)
@@ -127,30 +133,30 @@ export class StadiumJumbotron {
 
     const topBezel = new THREE.Mesh(horizBezelGeo, frameNeonMat);
     topBezel.position.set(0, JUMBOTRON_H / 2 + bezelThick / 2, 0.06);
-    unit.add(topBezel);
+    head.add(topBezel);
 
     const bottomBezel = new THREE.Mesh(horizBezelGeo, frameNeonMat);
     bottomBezel.position.set(0, -(JUMBOTRON_H / 2 + bezelThick / 2), 0.06);
-    unit.add(bottomBezel);
+    head.add(bottomBezel);
 
     const leftBezel = new THREE.Mesh(vertBezelGeo, frameNeonMat);
     leftBezel.position.set(-(JUMBOTRON_W / 2 + bezelThick / 2), 0, 0.06);
-    unit.add(leftBezel);
+    head.add(leftBezel);
 
     const rightBezel = new THREE.Mesh(vertBezelGeo, frameNeonMat);
     rightBezel.position.set(JUMBOTRON_W / 2 + bezelThick / 2, 0, 0.06);
-    unit.add(rightBezel);
+    head.add(rightBezel);
 
     // Upper branding crown bar
     const crownGeo = new THREE.BoxGeometry(7.2, 0.48, 0.45);
     const crown = new THREE.Mesh(crownGeo, steelMat);
     crown.position.set(0, JUMBOTRON_H / 2 + 0.56, -0.15);
-    unit.add(crown);
+    head.add(crown);
 
     const crownStripGeo = new THREE.BoxGeometry(6.6, 0.14, 0.16);
     const crownStrip = new THREE.Mesh(crownStripGeo, accentNeonMat);
     crownStrip.position.set(0, JUMBOTRON_H / 2 + 0.56, 0.12);
-    unit.add(crownStrip);
+    head.add(crownStrip);
     this.geometries.push(crownGeo, crownStripGeo);
 
     // Heavy architectural steel truss girders suspending the board above the stand canopy
