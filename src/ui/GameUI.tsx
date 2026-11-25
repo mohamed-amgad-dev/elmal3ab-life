@@ -14,6 +14,7 @@ const MATCH_PHASES: MatchPhase[] = [
   'penalty_setup',
   'var_review',
   'goal_celebration',
+  'goal_replay',
 ];
 
 /**

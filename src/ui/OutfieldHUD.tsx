@@ -86,7 +86,7 @@ export default function OutfieldHUD() {
 
       {/* Non-blocking Pointer Lock hint when in free-mouse 360 camera */}
       {showReticle && !pointerLocked && (
-        <div className="pointer-events-none absolute top-[94px] left-1/2 -translate-x-1/2">
+        <div className="pointer-events-none absolute top-[106px] left-1/2 -translate-x-1/2">
           <div className="flex items-center gap-2 rounded-full border border-cyan-400/40 bg-slate-950/85 px-3.5 py-1 text-[11px] font-bold whitespace-nowrap text-cyan-100 backdrop-blur-md">
             <MousePointerClick size={13} className="text-cyan-300" />
             <span>اضغط على الملعب لتحريك الكاميرا بالماوس • Esc لإظهار المؤشر</span>
@@ -191,8 +191,10 @@ export default function OutfieldHUD() {
           </div>
 
           <div className="mt-2 flex flex-wrap items-center justify-center gap-1">
-            <KeyPill k="LMB / E" label="شوط" active={charging} hint="كليك شمال أو E — اشحن للمنطقة الذهبية" />
-            <KeyPill k="RMB / Space" label="باص" hint="كليك يمين أو Space" />
+            <KeyPill k="كليك شمال / E" label="شوط مقوس" active={charging} hint="كليك شمال أو E — اشحن للمنطقة الذهبية مع حركة الماوس للموزة" />
+            <KeyPill k="كليك يمين" label="باص سريع" hint="باص أرضي سريع في اتجاه السهم" />
+            <KeyPill k="Space" label="لوب عالي / باص" hint="ضغطة = باص، ضغطة مطوّلة = لوب عالي مقوس" />
+            <KeyPill k="Shift" label="سبرينت + زقة كورة" hint="امسك Shift للجري السريع واضغطه مع الكورة لزقة للأمام" />
             <KeyPill
               k="C"
               label={skillCooldown > 0.05 ? `ترقيصة ${skillCooldown.toFixed(1)}` : 'ترقيصة'}
@@ -208,6 +210,7 @@ export default function OutfieldHUD() {
             <KeyPill k="R" label="شغب!" dim={!canDive} hint={canDive ? undefined : 'الأدمن قفل الغطس والشغب'} />
             <KeyPill k="Q" label="تبديل" dim={!canSwitch} hint={canSwitch ? undefined : 'التبديل مقفول'} />
             <KeyPill k="T" label="كاميرا" dim={!canCamera} hint={canCamera ? undefined : 'الكاميرا متثبتة من الأدمن'} />
+            <KeyPill k="B" label="شات سريع (1-8)" hint="افتح عجلة الشات السريع واضغط 1 إلى 8" />
           </div>
         </div>
       </div>

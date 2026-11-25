@@ -1,6 +1,7 @@
-import { HelpCircle, Pause, Play } from 'lucide-react';
+import { HelpCircle, Mic, MicOff, Pause, Play } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import type { MatchPhase, TeamId } from '../types/game';
+import { useVoiceControls } from './networkBridge';
 import { MuteButton, STANCE_LABEL, TEAM_HEX, TEAM_NAMES, formatClock } from './uiKit';
 
 const PHASE_LABEL: Partial<Record<MatchPhase, string>> = {
@@ -9,6 +10,7 @@ const PHASE_LABEL: Partial<Record<MatchPhase, string>> = {
   penalty_setup: 'بلنتي! 🎯',
   var_review: 'مراجعة الفار 📺',
   goal_celebration: 'جووول! 🎉',
+  goal_replay: 'إعادة الهدف 🎥',
 };
 
 function TeamBlock({ team }: { team: TeamId }) {
@@ -50,6 +52,19 @@ export default function Scoreboard() {
   const isPaused = useGameStore((s) => s.isPaused);
   const setControlsOpen = useGameStore((s) => s.setControlsOpen);
   const dispatchCommand = useGameStore((s) => s.dispatchCommand);
+  const network = useGameStore((s) => s.network);
+  const isQuickChatOpen = useGameStore((s) => s.isQuickChatOpen);
+  const setQuickChatOpen = useGameStore((s) => s.setQuickChatOpen);
+  const voice = useVoiceControls();
+  const online = network.mode !== 'offline';
+  const pingColor =
+    network.pingMs <= 0
+      ? 'text-slate-300'
+      : network.pingMs < 80
+        ? 'text-emerald-300'
+        : network.pingMs < 160
+          ? 'text-amber-300'
+          : 'text-rose-300';
 
   const low = clockSec <= 15 && clockSec > 0;
   const phaseLabel = PHASE_LABEL[phase];
@@ -78,8 +93,8 @@ export default function Scoreboard() {
         <TeamBlock team="blue" />
       </div>
 
-      <div className="glass flex flex-col items-center justify-center gap-1.5 rounded-2xl p-1.5">
-        <div className="flex items-center gap-1.5">
+      <div className="glass flex flex-col items-center justify-center gap-1 rounded-2xl p-1.5">
+        <div className="flex items-center gap-1">
           <MuteButton size="sm" />
           <button
             type="button"
@@ -99,6 +114,43 @@ export default function Scoreboard() {
           >
             {isPaused ? <Play size={18} /> : <Pause size={18} />}
           </button>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setQuickChatOpen(!isQuickChatOpen)}
+            title="شات سريع (B)"
+            aria-label="شات سريع"
+            aria-pressed={isQuickChatOpen}
+            className={`btn-ghost h-9 gap-1 px-2 text-xs font-black whitespace-nowrap ${
+              isQuickChatOpen ? 'border-cyan-300/70 bg-cyan-500/20 text-cyan-100' : 'text-cyan-200'
+            }`}
+          >
+            💬 B
+          </button>
+          {online && (
+            <>
+              <span
+                title="زمن الاستجابة"
+                className={`flex h-9 items-center rounded-xl border border-white/10 bg-slate-950/60 px-2 text-[11px] font-black whitespace-nowrap tabular-nums ${pingColor}`}
+                dir="ltr"
+              >
+                {network.pingMs}ms
+              </span>
+              <button
+                type="button"
+                disabled={voice.busy || !network.peerConnected}
+                onClick={() => void voice.quickToggle()}
+                title={voice.voiceActive && !voice.micMuted ? 'اكتم الميك' : 'افتح الميك'}
+                aria-label={voice.voiceActive && !voice.micMuted ? 'اكتم الميك' : 'افتح الميك'}
+                className={`btn-ghost h-9 w-9 ${
+                  voice.voiceActive && !voice.micMuted ? 'text-emerald-300' : 'text-rose-300'
+                }`}
+              >
+                {voice.voiceActive && !voice.micMuted ? <Mic size={16} /> : <MicOff size={16} />}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
