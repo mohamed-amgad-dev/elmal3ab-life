@@ -5,7 +5,7 @@ import AdminSettingsPanel from './AdminSettingsPanel';
 import OnlineRoomPanel from './OnlineRoomPanel';
 import PitchRolePicker from './PitchRolePicker';
 import { dismissInviteAutoJoin, getNet } from './networkBridge';
-import { MuteButton, sanitizeSlot } from './uiKit';
+import { DIFFICULTY_META, MuteButton, sanitizeSlot } from './uiKit';
 
 export default function LobbyScreen() {
   const rules = useGameStore((s) => s.rules);
@@ -130,8 +130,9 @@ export default function LobbyScreen() {
           </button>
         )}
 
-        <div className="hidden w-[170px] text-end text-xs font-bold text-slate-400 md:block">
-          {rules.teamSize} ضد {rules.teamSize} • {Math.round(rules.matchDurationSec / 60)} دقايق
+        <div className="hidden min-w-[190px] text-end text-xs font-bold whitespace-nowrap text-slate-300 md:block">
+          {rules.teamSize} ضد {rules.teamSize} • {Math.round(rules.matchDurationSec / 60)} دقايق •{' '}
+          {DIFFICULTY_META[rules.aiDifficulty].label} {DIFFICULTY_META[rules.aiDifficulty].emoji}
         </div>
       </footer>
     </div>

@@ -80,7 +80,7 @@ function lerp(a: number, b: number, t: number): number {
 }
 
 /**
- * Expressive procedural arcade animation state machine handling all 19
+ * Expressive procedural arcade animation state machine handling all 25
  * `CharacterAnimState` values with smooth pose blending, comedic physics
  * exaggeration, facial expressions, and role prop visibility.
  */
@@ -411,67 +411,201 @@ export class CharacterRig {
         break;
       }
 
-      case 'gk_dive_left': {
-        // Full horizontal lateral dive to character's LEFT (+X -> negative bodyRotZ)
-        blendSpeed = 24;
-        const airArc = Math.sin(Math.min(t / 0.65, 1) * Math.PI);
-        p.bodyPosX = 0.35;
-        p.bodyPosY = 0.42 + airArc * 0.55;
-        p.bodyRotZ = -1.46;
-        p.headRotZ = 0.45;
-        p.lArmX = -2.95;
-        p.rArmX = -2.85;
-        p.lArmZ = 0.22;
-        p.rArmZ = -0.1;
-        p.lForearmX = -0.1;
-        p.rForearmX = -0.1;
-        p.lLegX = 0.15;
-        p.rLegX = -0.18;
-        p.rKneeX = 0.35;
-        p.browTilt = 0.3;
+      case 'gk_dive_left':
+      case 'gk_dive_right': {
+        // 3-phase athletic diving save: spring takeoff -> full-stretch airborne reach -> turf landing slide & push-up recovery
+        const dir = animState === 'gk_dive_left' ? 1 : -1;
+        blendSpeed = 28;
+        if (t < 0.14) {
+          // Phase 1 (0..0.14s): Explosive spring takeoff
+          const u = t / 0.14;
+          const spring = Math.sin(u * Math.PI * 0.5);
+          p.bodyPosX = dir * lerp(0.06, 0.3, spring);
+          p.bodyPosY = lerp(-0.14, 0.34, spring);
+          p.bodyPosZ = 0.04;
+          p.bodyRotX = 0.1;
+          p.bodyRotZ = -dir * lerp(0.24, 1.05, spring);
+          p.torsoRotX = lerp(0.24, 0.06, u);
+          p.headRotZ = dir * lerp(0.15, 0.42, u);
+          p.lArmX = lerp(-1.2, -2.75, spring);
+          p.rArmX = lerp(-1.2, -2.75, spring);
+          p.lArmZ = 0.24;
+          p.rArmZ = -0.24;
+          p.lForearmX = lerp(-0.8, -0.15, u);
+          p.rForearmX = lerp(-0.8, -0.15, u);
+          p.lLegX = -0.68;
+          p.rLegX = -0.68;
+          p.lKneeX = 1.18;
+          p.rKneeX = 1.18;
+        } else if (t < 0.52) {
+          // Phase 2 (0.14..0.52s): Full-stretch airborne horizontal reach (~0.68m airArc peak)
+          const u = (t - 0.14) / 0.38;
+          const airArc = Math.sin(u * Math.PI) * 0.68;
+          p.bodyPosX = dir * lerp(0.3, 0.56, u);
+          p.bodyPosY = 0.24 + airArc;
+          p.bodyPosZ = 0.06;
+          p.bodyRotX = 0.04;
+          p.bodyRotZ = -dir * 1.48;
+          p.headRotY = dir * 0.22;
+          p.headRotZ = dir * 0.52;
+          p.lArmX = dir > 0 ? -2.98 : -2.86;
+          p.rArmX = dir > 0 ? -2.86 : -2.98;
+          p.lArmZ = dir > 0 ? 0.22 : 0.1;
+          p.rArmZ = dir > 0 ? -0.1 : -0.22;
+          p.lForearmX = -0.06;
+          p.rForearmX = -0.06;
+          p.lLegX = dir > 0 ? -0.18 : 0.18;
+          p.rLegX = dir > 0 ? 0.18 : -0.18;
+          p.lKneeX = dir > 0 ? 0.36 : 0.06;
+          p.rKneeX = dir > 0 ? 0.06 : 0.36;
+        } else {
+          // Phase 3 (0.52s+): Turf landing slide (~0.24m) & quick push-up/roll recovery
+          const w = t - 0.52;
+          const slideBounce = w < 0.24 ? Math.abs(Math.sin((w / 0.24) * Math.PI)) * 0.06 : 0;
+          const recover = Math.min(Math.max((w - 0.24) / 0.42, 0), 1);
+          p.bodyPosX = dir * lerp(0.56, 0.42, recover);
+          p.bodyPosY = 0.24 + slideBounce + recover * 0.1;
+          p.bodyPosZ = 0.06;
+          p.bodyRotX = lerp(0.04, 0.38, recover);
+          p.bodyRotZ = -dir * lerp(1.52, 0.72, recover);
+          p.torsoRotX = lerp(0.08, 0.26, recover);
+          p.headRotX = lerp(0, -0.24, recover);
+          p.headRotZ = dir * lerp(0.45, 0.14, recover);
+          p.lArmX = lerp(-2.4, -1.15, recover);
+          p.rArmX = lerp(-2.4, -1.15, recover);
+          p.lArmZ = lerp(0.32, 0.48, recover);
+          p.rArmZ = lerp(-0.32, -0.48, recover);
+          p.lForearmX = lerp(-0.35, -0.85, recover);
+          p.rForearmX = lerp(-0.35, -0.85, recover);
+          p.lLegX = lerp(-0.18, -0.82, recover);
+          p.rLegX = lerp(0.12, -0.68, recover);
+          p.lKneeX = lerp(0.42, 1.28, recover);
+          p.rKneeX = lerp(0.24, 1.18, recover);
+        }
+        p.browTilt = 0.32;
         p.mouthScaleY = 2.0;
         break;
       }
 
-      case 'gk_dive_right': {
-        // Full horizontal lateral dive to character's RIGHT (-X -> positive bodyRotZ)
-        blendSpeed = 24;
-        const airArc = Math.sin(Math.min(t / 0.65, 1) * Math.PI);
-        p.bodyPosX = -0.35;
-        p.bodyPosY = 0.42 + airArc * 0.55;
-        p.bodyRotZ = 1.46;
-        p.headRotZ = -0.45;
-        p.lArmX = -2.85;
-        p.rArmX = -2.95;
-        p.lArmZ = 0.1;
-        p.rArmZ = -0.22;
-        p.lForearmX = -0.1;
-        p.rForearmX = -0.1;
-        p.lLegX = -0.18;
-        p.rLegX = 0.15;
-        p.lKneeX = 0.35;
-        p.browTilt = 0.3;
-        p.mouthScaleY = 2.0;
+      case 'gk_parry_left':
+      case 'gk_parry_right': {
+        // Dramatic high/wide fingertip parry deflection! Higher vault (~0.92m), arched torso, lead arm slap, turf roll
+        const dir = animState === 'gk_parry_left' ? 1 : -1;
+        blendSpeed = 30;
+        if (t < 0.12) {
+          const u = t / 0.12;
+          p.bodyPosX = dir * lerp(0.04, 0.24, u);
+          p.bodyPosY = lerp(-0.12, 0.44, u);
+          p.bodyPosZ = 0.05;
+          p.bodyRotX = -0.08;
+          p.bodyRotY = dir * 0.12;
+          p.bodyRotZ = -dir * lerp(0.18, 0.88, u);
+          p.lLegX = -0.62;
+          p.rLegX = -0.62;
+          p.lKneeX = 1.15;
+          p.rKneeX = 1.15;
+          p.lArmX = dir > 0 ? -2.85 : -1.2;
+          p.rArmX = dir > 0 ? -1.2 : -2.85;
+        } else if (t < 0.54) {
+          const u = (t - 0.12) / 0.42;
+          const airArc = Math.sin(u * Math.PI) * 0.92;
+          const slapPulse = Math.sin(Math.min(1, Math.max(0, (u - 0.22) / 0.44)) * Math.PI);
+          p.bodyPosX = dir * lerp(0.24, 0.58, u);
+          p.bodyPosY = 0.26 + airArc;
+          p.bodyPosZ = 0.08;
+          p.bodyRotX = -0.14;
+          p.bodyRotY = dir * 0.18;
+          p.bodyRotZ = -dir * 1.26;
+          p.torsoRotX = -0.22;
+          p.torsoRotY = dir * 0.16;
+          p.headRotX = -0.28;
+          p.headRotZ = dir * 0.42;
+          if (dir > 0) {
+            // Left lead arm maximally extended slapping ball over/wide, right arm bracing
+            p.lArmX = -3.08 - slapPulse * 0.14;
+            p.lArmZ = 0.34 + slapPulse * 0.15;
+            p.lForearmX = -0.04;
+            p.rArmX = -1.15;
+            p.rArmZ = -0.45;
+            p.rForearmX = -0.95;
+          } else {
+            // Right lead arm maximally extended slapping ball over/wide, left arm bracing
+            p.rArmX = -3.08 - slapPulse * 0.14;
+            p.rArmZ = -0.34 - slapPulse * 0.15;
+            p.rForearmX = -0.04;
+            p.lArmX = -1.15;
+            p.lArmZ = 0.45;
+            p.lForearmX = -0.95;
+          }
+          p.lLegX = dir > 0 ? -0.32 : 0.26;
+          p.rLegX = dir > 0 ? 0.26 : -0.32;
+          p.lKneeX = dir > 0 ? 0.62 : 0.14;
+          p.rKneeX = dir > 0 ? 0.14 : 0.62;
+        } else {
+          const w = t - 0.54;
+          const rollU = Math.min(w / 0.45, 1);
+          const hop = Math.sin(rollU * Math.PI) * 0.09;
+          p.bodyPosX = dir * lerp(0.58, 0.46, rollU);
+          p.bodyPosY = 0.24 + hop;
+          p.bodyPosZ = 0.08;
+          p.bodyRotX = lerp(-0.14, 0.52, rollU);
+          p.bodyRotY = dir * lerp(0.18, -0.22, rollU);
+          p.bodyRotZ = -dir * lerp(1.36, 0.85, rollU);
+          p.torsoRotX = lerp(-0.08, 0.34, rollU);
+          p.lArmX = -1.25;
+          p.rArmX = -1.25;
+          p.lForearmX = -0.9;
+          p.rForearmX = -0.9;
+          p.lLegX = lerp(-0.35, -0.88, rollU);
+          p.rLegX = lerp(-0.22, -0.78, rollU);
+          p.lKneeX = lerp(0.68, 1.32, rollU);
+          p.rKneeX = lerp(0.55, 1.24, rollU);
+        }
+        p.browTilt = 0.4;
+        p.mouthScaleX = 1.25;
+        p.mouthScaleY = 2.3;
         break;
       }
 
       case 'gk_catch': {
-        // Athletic scoop-and-clutch catch crouch!
-        blendSpeed = 24;
-        p.bodyPosY = -0.18;
-        p.torsoRotX = 0.32;
-        p.lLegX = -0.52;
-        p.rLegX = -0.52;
-        p.lLegZ = 0.22;
-        p.rLegZ = -0.22;
-        p.lKneeX = 0.92;
-        p.rKneeX = 0.92;
-        p.lArmX = -1.15;
-        p.rArmX = -1.15;
-        p.lArmZ = -0.28;
-        p.rArmZ = 0.28;
-        p.lForearmX = -1.05;
-        p.rForearmX = -1.05;
+        // Snappy catch-impact absorption recoil (0..0.18s) followed by secure ball-hugging athletic stance
+        blendSpeed = 28;
+        if (t < 0.18) {
+          const u = t / 0.18;
+          const impact = Math.sin(u * Math.PI);
+          p.bodyPosY = lerp(-0.06, -0.26, impact);
+          p.bodyPosZ = -impact * 0.08;
+          p.torsoRotX = lerp(0.2, 0.4, impact);
+          p.lLegX = lerp(-0.36, -0.66, impact);
+          p.rLegX = lerp(-0.36, -0.66, impact);
+          p.lLegZ = 0.22;
+          p.rLegZ = -0.22;
+          p.lKneeX = lerp(0.62, 1.14, impact);
+          p.rKneeX = lerp(0.62, 1.14, impact);
+          p.lArmX = lerp(-1.45, -1.15, u);
+          p.rArmX = lerp(-1.45, -1.15, u);
+          p.lArmZ = lerp(0.06, -0.32, u);
+          p.rArmZ = lerp(-0.06, 0.32, u);
+          p.lForearmX = lerp(-0.52, -1.18, u);
+          p.rForearmX = lerp(-0.52, -1.18, u);
+        } else {
+          const breath = Math.sin((t - 0.18) * 4.2) * 0.025;
+          p.bodyPosY = -0.18 + breath;
+          p.torsoRotX = 0.32;
+          p.headRotY = Math.sin((t - 0.18) * 2.4) * 0.22;
+          p.lLegX = -0.52;
+          p.rLegX = -0.52;
+          p.lLegZ = 0.22;
+          p.rLegZ = -0.22;
+          p.lKneeX = 0.92;
+          p.rKneeX = 0.92;
+          p.lArmX = -1.15;
+          p.rArmX = -1.15;
+          p.lArmZ = -0.3;
+          p.rArmZ = 0.3;
+          p.lForearmX = -1.14;
+          p.rForearmX = -1.14;
+        }
         p.browTilt = 0.25;
         break;
       }
@@ -566,6 +700,180 @@ export class CharacterRig {
         p.rForearmX = -0.42;
         p.headRotX = Math.sin(t * 5) * 0.1;
         p.browTilt = 0.2;
+        break;
+      }
+
+      case 'red_card_shock': {
+        // Pure Egyptian football drama! Phase 1: grab head in disbelief; Phase 2: furious pleading & hops
+        blendSpeed = 26;
+        if (t < 0.38) {
+          const u = Math.min(t / 0.22, 1);
+          p.bodyPosY = -0.1 * u;
+          p.torsoRotX = -0.22 * u;
+          p.headRotX = -0.26 * u;
+          p.headRotY = Math.sin(t * 14) * 0.2;
+          p.lLegX = -0.38 * u;
+          p.rLegX = -0.38 * u;
+          p.lKneeX = 0.68 * u;
+          p.rKneeX = 0.68 * u;
+          // Both arms fly up to grab head!
+          p.lArmX = lerp(-0.5, -2.55, u);
+          p.rArmX = lerp(-0.5, -2.55, u);
+          p.lArmZ = 0.52;
+          p.rArmZ = -0.52;
+          p.lForearmX = -1.55 * u;
+          p.rForearmX = -1.55 * u;
+          p.browTilt = -0.42;
+          p.browLift = 0.05;
+          p.mouthScaleX = 1.45;
+          p.mouthScaleY = 3.0;
+        } else {
+          const w = t - 0.38;
+          const hop = Math.abs(Math.sin(w * 10.5));
+          const plead = Math.sin(w * 8.5);
+          p.bodyPosY = hop * 0.22;
+          p.torsoRotX = 0.14;
+          p.torsoRotY = plead * 0.24;
+          p.torsoRotZ = plead * 0.12;
+          p.headRotY = Math.sin(w * 18) * 0.44;
+          if (plead > 0) {
+            // Wide-open "Me?! I didn't touch him!!" arm spread
+            p.lArmX = -1.35;
+            p.rArmX = -1.35;
+            p.lArmZ = 0.95 + plead * 0.25;
+            p.rArmZ = -0.95 - plead * 0.25;
+            p.lForearmX = -0.35;
+            p.rForearmX = -0.35;
+          } else {
+            // Pointing at own chest ("ME?!")
+            p.lArmX = -1.25;
+            p.rArmX = -1.25;
+            p.lArmZ = -0.35;
+            p.rArmZ = 0.35;
+            p.lForearmX = -1.45;
+            p.rForearmX = -1.45;
+          }
+          p.lKneeX = hop * 0.48;
+          p.rKneeX = hop * 0.48;
+          p.browTilt = 0.56;
+          p.mouthScaleX = 1.4;
+          p.mouthScaleY = 2.6 + Math.sin(w * 22) * 0.4;
+        }
+        break;
+      }
+
+      case 'walk_of_shame': {
+        // Hilarious slow angry stomp off the pitch with backward referee glares & air-kicks!
+        blendSpeed = 18;
+        const stomp = Math.sin(t * 5.2);
+        const lookBack = Math.sin(t * 2.6) > 0.55;
+        const airKick = Math.sin(t * 1.9 + 1.4) > 0.76;
+        p.bodyPosY = Math.abs(stomp) * 0.1 - 0.03;
+        p.bodyRotZ = stomp * 0.08;
+        p.torsoRotX = 0.24;
+        p.torsoRotY = lookBack ? 0.44 : -stomp * 0.12;
+        p.lLegX = stomp * 0.72;
+        p.rLegX = airKick ? -0.95 : -stomp * 0.72;
+        p.lKneeX = Math.max(0.1, -stomp * 0.82);
+        p.rKneeX = airKick ? 0.14 : Math.max(0.1, stomp * 0.82);
+        if (lookBack) {
+          p.headRotY = 1.05;
+          p.rArmX = 0.85;
+          p.rArmZ = -0.82;
+          p.rForearmX = -0.25;
+          p.lArmX = -0.2;
+          p.lArmZ = 0.22;
+        } else if (airKick) {
+          p.headRotY = Math.sin(t * 16) * 0.3;
+          p.lArmX = -2.15 + Math.sin(t * 26) * 0.28;
+          p.lArmZ = 0.45;
+          p.lForearmX = -0.9;
+          p.rArmX = 0.3;
+        } else {
+          p.headRotX = 0.24;
+          p.headRotY = Math.sin(t * 6.5) * 0.22;
+          p.lArmX = -stomp * 0.55;
+          p.rArmX = stomp * 0.55;
+          p.lArmZ = 0.24;
+          p.rArmZ = -0.24;
+          p.lForearmX = -0.45;
+          p.rForearmX = -0.45;
+        }
+        p.browTilt = 0.55;
+        p.mouthScaleX = 1.25;
+        p.mouthScaleY = 1.8;
+        break;
+      }
+
+      case 'sub_walk_off': {
+        // Reluctant comedic trudge toward dugout shrugging palms-up & waving dismissively!
+        blendSpeed = 18;
+        const c = Math.sin(t * 6.2);
+        const shrugPhase = Math.sin(t * 2.4) >= 0;
+        p.bodyPosY = Math.abs(Math.cos(t * 6.2)) * 0.07;
+        p.torsoRotX = 0.16;
+        p.headRotX = 0.14;
+        p.headRotY = Math.sin(t * 7.8) * 0.36;
+        p.lLegX = c * 0.62;
+        p.rLegX = -c * 0.62;
+        p.lKneeX = Math.max(0.08, -c * 0.72);
+        p.rKneeX = Math.max(0.08, c * 0.72);
+        if (shrugPhase) {
+          p.lArmX = -0.78;
+          p.rArmX = -0.78;
+          p.lArmZ = 0.82;
+          p.rArmZ = -0.82;
+          p.lForearmX = -0.95;
+          p.rForearmX = -0.95;
+        } else {
+          const wave = Math.sin(t * 14) * 0.42;
+          p.rArmX = -1.25 + wave;
+          p.rArmZ = -0.78;
+          p.rForearmX = -0.45;
+          p.lArmX = -c * 0.35;
+          p.lArmZ = 0.18;
+        }
+        p.browTilt = -0.24;
+        p.browLift = 0.03;
+        p.mouthScaleX = 0.85;
+        p.mouthScaleY = 1.5;
+        break;
+      }
+
+      case 'sub_enter_pitch': {
+        // Hyped-up reserve sprinting onto pitch with double-clap & fist-pump hop stride!
+        blendSpeed = 24;
+        const freq = 13.5;
+        const c = Math.sin(t * freq);
+        const hop = Math.abs(Math.sin(t * 11.5));
+        const cycle = t % 1.4;
+        p.bodyPosY = hop * 0.24;
+        p.torsoRotX = 0.18;
+        p.headRotX = -0.14;
+        p.lLegX = c * 0.95;
+        p.rLegX = -c * 0.95;
+        p.lKneeX = Math.max(0.1, -c * 1.1);
+        p.rKneeX = Math.max(0.1, c * 1.1);
+        if (cycle < 0.72) {
+          const clap = Math.abs(Math.sin(t * 16));
+          p.lArmX = -1.32;
+          p.rArmX = -1.32;
+          p.lArmZ = -0.18 - clap * 0.22;
+          p.rArmZ = 0.18 + clap * 0.22;
+          p.lForearmX = -0.95 - clap * 0.45;
+          p.rForearmX = -0.95 - clap * 0.45;
+        } else {
+          const pump = Math.sin(t * 18) * 0.26;
+          p.lArmX = -2.45 + pump;
+          p.rArmX = -2.45 - pump;
+          p.lArmZ = 0.55;
+          p.rArmZ = -0.55;
+          p.lForearmX = -0.45;
+          p.rForearmX = -0.45;
+        }
+        p.browLift = 0.04;
+        p.mouthScaleX = 1.45;
+        p.mouthScaleY = 2.3;
         break;
       }
 

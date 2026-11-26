@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 
-const HUMANOID_MODEL_URL = '/models/player_humanoid.glb';
+const HUMANOID_MODEL_URL = './models/player_humanoid.glb';
 const TARGET_PLAYER_HEIGHT_M = 1.82;
 
 export interface LoadedHumanoidTemplate {

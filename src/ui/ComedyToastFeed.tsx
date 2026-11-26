@@ -6,6 +6,8 @@ const TONE_STYLE: Record<ComedyEventTone, { border: string; bg: string; label: s
   goal: { border: '#10b981', bg: 'rgba(16,185,129,0.18)', label: 'جول', text: '#6ee7b7' },
   card_yellow: { border: '#fbbf24', bg: 'rgba(251,191,36,0.18)', label: 'أصفر', text: '#fde68a' },
   card_red: { border: '#ff2e4c', bg: 'rgba(255,46,76,0.2)', label: 'أحمر', text: '#fda4af' },
+  foul: { border: '#f97316', bg: 'rgba(249,115,22,0.2)', label: 'فاول', text: '#fdba74' },
+  shootout: { border: '#eab308', bg: 'rgba(234,179,8,0.22)', label: 'ترجيح', text: '#fef08a' },
   var: { border: '#00c2ff', bg: 'rgba(0,194,255,0.18)', label: 'فار', text: '#7dd3fc' },
   bench: { border: '#a78bfa', bg: 'rgba(167,139,250,0.18)', label: 'دكة', text: '#ddd6fe' },
   dive: { border: '#fb923c', bg: 'rgba(251,146,60,0.18)', label: 'غطس', text: '#fed7aa' },
@@ -17,6 +19,7 @@ const VISIBLE_MS = 9000;
 
 export default function ComedyToastFeed() {
   const events = useGameStore((s) => s.events);
+  const phase = useGameStore((s) => s.phase);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -27,8 +30,15 @@ export default function ComedyToastFeed() {
   const visible = events.filter((e) => now - e.timestamp < VISIBLE_MS).slice(0, 4);
   if (visible.length === 0) return null;
 
+  const topOffsetClass =
+    phase === 'penalty_shootout'
+      ? 'top-[240px]'
+      : phase === 'free_kick_setup'
+        ? 'top-[196px]'
+        : 'top-[94px]';
+
   return (
-    <div className="absolute top-[94px] left-3 flex w-[270px] flex-col gap-2">
+    <div className={`absolute ${topOffsetClass} left-3 flex w-[270px] flex-col gap-2 transition-[top] duration-200`}>
       {visible.map((e) => {
         const t = TONE_STYLE[e.tone];
         return (

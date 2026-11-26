@@ -6,20 +6,32 @@ import {
   DEFAULT_HUMAN_SLOT,
   DEFAULT_MOUSE_SENSITIVITY,
   DEFAULT_NETWORK_STATE,
+  INITIAL_CALL_FOR_PASS_STATE,
   INITIAL_GOAL_REPLAY_STATE,
+  INITIAL_MATCH_DRAMA_STATE,
   MAX_MOUSE_SENSITIVITY,
   MIN_MOUSE_SENSITIVITY,
+  createInitialCoachDisciplineStats,
+  createInitialFreeKickState,
+  createInitialPenaltyShootoutState,
   resolveDualHumanSlotConflict,
+  type AIDifficulty,
   type AdminRules,
+  type CallForPassState,
   type CameraMode,
+  type CoachDisciplineStats,
   type ComedyEvent,
+  type FreeKickState,
   type GameCommand,
   type GoalReplayState,
   type GraphicsQuality,
   type HumanSlotConfig,
   type MatchAward,
+  type MatchDramaState,
   type MatchPhase,
   type NetworkState,
+  type PenaltyShootoutState,
+  type PendingSubstitution,
   type PlayerEntityState,
   type ShotPrecisionZone,
   type TacticalStance,
@@ -61,6 +73,12 @@ export interface MatchSnapshot {
   tactics: Record<TeamId, TacticalStance>;
   varState: VARState;
   goalReplayState: GoalReplayState;
+  dramaState: MatchDramaState;
+  pendingSub: PendingSubstitution | null;
+  callForPass: CallForPassState;
+  freeKick: FreeKickState;
+  penaltyShootout: PenaltyShootoutState;
+  coachDiscipline: CoachDisciplineStats;
   awards: MatchAward[];
   activeCamera: CameraMode;
   isPaused: boolean;
@@ -84,6 +102,7 @@ export interface GameStoreState extends MatchSnapshot {
   network: NetworkState;
 
   setRules: (partial: Partial<AdminRules>) => void;
+  setAIDifficulty: (difficulty: AIDifficulty) => void;
   applyPreset: (preset: 'chaos' | 'classic') => void;
   setHumanSlot: (partial: Partial<HumanSlotConfig>) => void;
   setHostSlot: (partial: Partial<HumanSlotConfig>) => void;
@@ -130,6 +149,12 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   tactics: { red: 'balanced', blue: 'balanced' },
   varState: { ...INITIAL_VAR_STATE },
   goalReplayState: { ...INITIAL_GOAL_REPLAY_STATE },
+  dramaState: { ...INITIAL_MATCH_DRAMA_STATE },
+  pendingSub: null,
+  callForPass: { ...INITIAL_CALL_FOR_PASS_STATE },
+  freeKick: createInitialFreeKickState(),
+  penaltyShootout: createInitialPenaltyShootoutState(),
+  coachDiscipline: createInitialCoachDisciplineStats(),
   events: [],
   awards: [],
   muted: false,
@@ -142,10 +167,12 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
 
   setRules: (partial) =>
     set((state) => {
+      const onlyDifficultyChanged =
+        Object.keys(partial).length === 1 && partial.aiDifficulty !== undefined;
       const nextRules: AdminRules = {
         ...state.rules,
         ...partial,
-        preset: partial.preset ?? 'custom',
+        preset: partial.preset ?? (onlyDifficultyChanged ? state.rules.preset : 'custom'),
       };
       const shouldSyncClock =
         partial.matchDurationSec !== undefined &&
@@ -164,12 +191,24 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       };
     }),
 
+  setAIDifficulty: (difficulty) =>
+    set((state) => ({
+      rules: {
+        ...state.rules,
+        aiDifficulty: difficulty,
+      },
+    })),
+
   applyPreset: (preset) =>
     set((state) => {
-      const nextRules =
+      const baseRules =
         preset === 'chaos'
           ? { ...DEFAULT_CHAOS_RULES }
           : { ...DEFAULT_CLASSIC_RULES };
+      const nextRules: AdminRules = {
+        ...baseRules,
+        aiDifficulty: state.rules.aiDifficulty,
+      };
       const shouldSyncClock = state.phase === 'menu' || state.phase === 'lobby';
       const nextGuestSlot =
         state.network.mode !== 'offline'
@@ -410,6 +449,12 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       tactics: { red: 'balanced', blue: 'balanced' },
       varState: { ...INITIAL_VAR_STATE },
       goalReplayState: { ...INITIAL_GOAL_REPLAY_STATE },
+      dramaState: { ...INITIAL_MATCH_DRAMA_STATE },
+      pendingSub: null,
+      callForPass: { ...INITIAL_CALL_FOR_PASS_STATE },
+      freeKick: createInitialFreeKickState(),
+      penaltyShootout: createInitialPenaltyShootoutState(),
+      coachDiscipline: createInitialCoachDisciplineStats(),
       events: [],
       awards: [],
       activeCamera: humanSlot.cameraMode,

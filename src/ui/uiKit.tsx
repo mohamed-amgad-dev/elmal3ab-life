@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Volume2, VolumeX } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import type {
+  AIDifficulty,
   AdminRules,
   CameraMode,
   HumanSlotConfig,
@@ -11,6 +12,33 @@ import type {
 } from '../types/game';
 
 /* ─────────────── shared labels ─────────────── */
+
+export const DIFFICULTY_LEVELS: readonly AIDifficulty[] = ['easy', 'medium', 'hard'] as const;
+
+export const DIFFICULTY_META: Record<
+  AIDifficulty,
+  { label: string; emoji: string; desc: string; badgeClass: string; tone?: 'gold' | 'cyan' }
+> = {
+  easy: {
+    label: 'سهل',
+    emoji: '🟢',
+    desc: 'لعب هادي وممتع — البوتات والحارس بيدوك مساحة',
+    badgeClass: 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200',
+  },
+  medium: {
+    label: 'متوسط',
+    emoji: '🟡',
+    desc: 'توازن واقعي — تمريرات وتمركز وحارس متألق',
+    badgeClass: 'border-amber-300/60 bg-amber-400/15 text-amber-200',
+    tone: 'gold',
+  },
+  hard: {
+    label: 'صعب',
+    emoji: '🔥',
+    desc: 'تحدي ناري — ضغط ذكي وحارس أخطبوط بدون غش',
+    badgeClass: 'border-rose-400/60 bg-rose-500/15 text-rose-200',
+  },
+};
 
 export const TEAM_NAMES: Record<TeamId, string> = {
   red: 'النسور الحمر',

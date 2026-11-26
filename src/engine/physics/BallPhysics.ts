@@ -471,7 +471,7 @@ export class BallPhysics implements IBallPhysics {
       this.updateVisualEffects();
       this.updateTrajectoryArc(config);
       const spd = Math.hypot(this.state.vel.x, this.state.vel.y, this.state.vel.z);
-      return { goalScored: null, hitPost: false, bounced: false, speed: spd };
+      return { goalScored: null, hitPost: false, bounced: false, hitTouchline: false, speed: spd };
     }
 
     if (this.rapierWorld) {
@@ -484,6 +484,7 @@ export class BallPhysics implements IBallPhysics {
     let goalScored: TeamId | null = null;
     let hitPost = false;
     let bounced = false;
+    let hitTouchline = false;
 
     const goalHalfW = config.goalWidth * 0.5;
     const pos = this.state.pos;
@@ -586,6 +587,7 @@ export class BallPhysics implements IBallPhysics {
           pos.z = config.halfLength - BALL_RADIUS;
           vel.z = -Math.abs(vel.z) * WALL_RESTITUTION;
           bounced = true;
+          hitTouchline = true;
         }
       }
 
@@ -621,6 +623,7 @@ export class BallPhysics implements IBallPhysics {
           pos.z = -config.halfLength + BALL_RADIUS;
           vel.z = Math.abs(vel.z) * WALL_RESTITUTION;
           bounced = true;
+          hitTouchline = true;
         }
       }
 
@@ -630,10 +633,12 @@ export class BallPhysics implements IBallPhysics {
         pos.x = maxX;
         vel.x = -Math.abs(vel.x) * WALL_RESTITUTION;
         bounced = true;
+        hitTouchline = true;
       } else if (pos.x < -maxX) {
         pos.x = -maxX;
         vel.x = Math.abs(vel.x) * WALL_RESTITUTION;
         bounced = true;
+        hitTouchline = true;
       }
     }
 
@@ -660,6 +665,7 @@ export class BallPhysics implements IBallPhysics {
       goalScored,
       hitPost,
       bounced,
+      hitTouchline,
       speed: totalSpeed,
     };
   }
@@ -720,6 +726,7 @@ export class BallPhysics implements IBallPhysics {
       goalScored,
       hitPost: events.hitPost,
       bounced: events.bounced,
+      hitTouchline: events.hitTouchline,
       speed: totalSpeed,
     };
   }

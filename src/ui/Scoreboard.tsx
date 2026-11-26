@@ -2,13 +2,17 @@ import { HelpCircle, Mic, MicOff, Pause, Play } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import type { MatchPhase, TeamId } from '../types/game';
 import { useVoiceControls } from './networkBridge';
-import { MuteButton, STANCE_LABEL, TEAM_HEX, TEAM_NAMES, formatClock } from './uiKit';
+import { DIFFICULTY_META, MuteButton, STANCE_LABEL, TEAM_HEX, TEAM_NAMES, formatClock } from './uiKit';
 
 const PHASE_LABEL: Partial<Record<MatchPhase, string>> = {
   kickoff: 'ضربة البداية',
   paused_whistle: 'الحكم وقّف اللعب 🛑',
+  free_kick_setup: 'ركلة حرة ⚽',
   penalty_setup: 'بلنتي! 🎯',
+  penalty_shootout: 'ركلات الترجيح 🥅',
   var_review: 'مراجعة الفار 📺',
+  red_card_drama: 'طرد أحمر! 🟥',
+  substitution_stoppage: 'تبديل رسمي 🔄',
   goal_celebration: 'جووول! 🎉',
   goal_replay: 'إعادة الهدف 🎥',
 };
@@ -50,6 +54,7 @@ export default function Scoreboard() {
   const clockSec = useGameStore((s) => s.clockSec);
   const phase = useGameStore((s) => s.phase);
   const isPaused = useGameStore((s) => s.isPaused);
+  const aiDifficulty = useGameStore((s) => s.rules.aiDifficulty);
   const setControlsOpen = useGameStore((s) => s.setControlsOpen);
   const dispatchCommand = useGameStore((s) => s.dispatchCommand);
   const network = useGameStore((s) => s.network);
@@ -68,13 +73,14 @@ export default function Scoreboard() {
 
   const low = clockSec <= 15 && clockSec > 0;
   const phaseLabel = PHASE_LABEL[phase];
+  const diffMeta = DIFFICULTY_META[aiDifficulty];
 
   return (
     <div className="absolute top-3 left-1/2 flex -translate-x-1/2 items-stretch gap-2">
-      <div className="glass flex w-[540px] items-center gap-4 rounded-2xl px-5 py-2.5" style={{ borderColor: 'rgba(251,191,36,0.25)' }}>
+      <div className="glass flex w-[540px] items-center gap-4 rounded-2xl px-5 py-2" style={{ borderColor: 'rgba(251,191,36,0.25)' }}>
         <TeamBlock team="red" />
 
-        <div className="flex w-[104px] shrink-0 flex-col items-center">
+        <div className="flex w-[108px] shrink-0 flex-col items-center">
           <div
             className={`rounded-lg border px-3 py-0.5 font-display text-2xl leading-tight font-black tabular-nums ${
               low
@@ -85,9 +91,14 @@ export default function Scoreboard() {
           >
             {formatClock(clockSec)}
           </div>
-          <div className="mt-0.5 h-4 text-[10px] leading-4 font-bold whitespace-nowrap text-cyan-300">
+          <div className="mt-0.5 h-3.5 text-[10px] leading-3.5 font-bold whitespace-nowrap text-cyan-300">
             {phaseLabel ?? (isPaused ? 'إيقاف مؤقت ⏸' : 'مباشر 🔴')}
           </div>
+          <span
+            className={`mt-0.5 rounded-full border px-1.5 py-[1px] text-[9px] leading-tight font-black whitespace-nowrap ${diffMeta.badgeClass}`}
+          >
+            {diffMeta.label} {diffMeta.emoji}
+          </span>
         </div>
 
         <TeamBlock team="blue" />

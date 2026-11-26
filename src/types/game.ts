@@ -24,6 +24,8 @@ export type CameraMode =
 
 export type PresetId = 'chaos' | 'classic' | 'custom';
 
+export type AIDifficulty = 'easy' | 'medium' | 'hard';
+
 export type TacticalStance =
   | 'balanced'
   | 'all_out_attack'
@@ -54,11 +56,17 @@ export type CharacterAnimState =
   | 'celebrate'
   | 'gk_dive_left'
   | 'gk_dive_right'
+  | 'gk_parry_left'
+  | 'gk_parry_right'
   | 'gk_catch'
   | 'ref_whistle'
   | 'ref_yellow_card'
   | 'ref_red_card'
   | 'ref_var_signal'
+  | 'red_card_shock'
+  | 'walk_of_shame'
+  | 'sub_walk_off'
+  | 'sub_enter_pitch'
   | 'coach_shout'
   | 'sitting_bench'
   | 'bench_rage';
@@ -75,14 +83,19 @@ export type MatchPhase =
   | 'kickoff'
   | 'playing'
   | 'paused_whistle'
+  | 'free_kick_setup'
   | 'penalty_setup'
+  | 'penalty_shootout'
   | 'var_review'
+  | 'red_card_drama'
+  | 'substitution_stoppage'
   | 'goal_celebration'
   | 'goal_replay'
   | 'full_time';
 
 export interface AdminRules {
   preset: PresetId;
+  aiDifficulty: AIDifficulty;
   teamSize: 2 | 3;
   matchDurationSec: 120 | 180 | 300;
   allowTeamSwitch: boolean;
@@ -96,6 +109,7 @@ export interface AdminRules {
 
 export const DEFAULT_CHAOS_RULES: AdminRules = {
   preset: 'chaos',
+  aiDifficulty: 'medium',
   teamSize: 3,
   matchDurationSec: 180,
   allowTeamSwitch: true,
@@ -109,6 +123,7 @@ export const DEFAULT_CHAOS_RULES: AdminRules = {
 
 export const DEFAULT_CLASSIC_RULES: AdminRules = {
   preset: 'classic',
+  aiDifficulty: 'medium',
   teamSize: 3,
   matchDurationSec: 180,
   allowTeamSwitch: true,
@@ -232,6 +247,224 @@ export const INITIAL_GOAL_REPLAY_STATE: GoalReplayState = {
   duration: GOAL_REPLAY_DURATION_SEC,
 };
 
+/* ─────────────── Football-Law Stoppage & Match Drama Types ─────────────── */
+
+export interface PendingSubstitution {
+  team: TeamId;
+  outPlayerId: string;
+  outPlayerName: string;
+  outPlayerNumber: number;
+  inPlayerId: string;
+  inPlayerName: string;
+  inPlayerNumber: number;
+  requestedByHumanBench?: boolean;
+  actor?: 'host' | 'guest';
+}
+
+export interface MatchDramaState {
+  kind: 'none' | 'red_card' | 'substitution';
+  stage: 'confrontation' | 'walk_off' | 'exchange' | 'enter_pitch';
+  team: TeamId;
+  primaryPlayerId: string;
+  primaryPlayerName: string;
+  primaryPlayerNumber: number;
+  secondaryPlayerId?: string;
+  secondaryPlayerName?: string;
+  secondaryPlayerNumber?: number;
+  headline: string;
+  subtext: string;
+  elapsed: number;
+  duration: number;
+}
+
+export const INITIAL_MATCH_DRAMA_STATE: MatchDramaState = {
+  kind: 'none',
+  stage: 'confrontation',
+  team: 'red',
+  primaryPlayerId: '',
+  primaryPlayerName: '',
+  primaryPlayerNumber: 0,
+  headline: '',
+  subtext: '',
+  elapsed: 0,
+  duration: 0,
+};
+
+/* ─────────────── Team Play, Coach Discipline, Free Kick & Penalty Shootout Contracts ─────────────── */
+
+export interface CallForPassState {
+  active: boolean;
+  callerId: string | null;
+  callerName: string;
+  callerTeam: TeamId | null;
+  actor?: 'host' | 'guest';
+  remainingSec: number;
+  cooldownSec: number;
+}
+
+export const CALL_FOR_PASS_WINDOW_SEC = 2.6;
+export const CALL_FOR_PASS_COOLDOWN_SEC = 1.4;
+
+export const INITIAL_CALL_FOR_PASS_STATE: CallForPassState = {
+  active: false,
+  callerId: null,
+  callerName: '',
+  callerTeam: null,
+  remainingSec: 0,
+  cooldownSec: 0,
+};
+
+export interface CoachDisciplineTeamStats {
+  subsUsed: number;
+  maxSubs: number;
+  cooldownRemainingSec: number;
+  lastSubMatchElapsedSec: number | null;
+  subbedOutPlayerIds: string[];
+}
+
+export type CoachDisciplineStats = Record<TeamId, CoachDisciplineTeamStats>;
+
+export const MAX_SUBS_PER_TEAM = 3;
+export const COACH_SUB_COOLDOWN_SEC = 42;
+export const MIN_ROUTINE_SUB_ELAPSED_SEC = 35;
+
+export function createInitialCoachDisciplineStats(): CoachDisciplineStats {
+  return {
+    red: {
+      subsUsed: 0,
+      maxSubs: MAX_SUBS_PER_TEAM,
+      cooldownRemainingSec: 0,
+      lastSubMatchElapsedSec: null,
+      subbedOutPlayerIds: [],
+    },
+    blue: {
+      subsUsed: 0,
+      maxSubs: MAX_SUBS_PER_TEAM,
+      cooldownRemainingSec: 0,
+      lastSubMatchElapsedSec: null,
+      subbedOutPlayerIds: [],
+    },
+  };
+}
+
+export const INITIAL_COACH_DISCIPLINE_STATS: CoachDisciplineStats =
+  createInitialCoachDisciplineStats();
+
+export type FreeKickStage = 'whistle_freeze' | 'wall_setup' | 'ready_to_kick';
+
+export interface FreeKickState {
+  active: boolean;
+  stage: FreeKickStage;
+  awardedTeam: TeamId;
+  spot: Vec3;
+  takerId: string | null;
+  takerName: string;
+  isHumanTaker: boolean;
+  isDirectRange: boolean;
+  wallSize: number;
+  wallPlayerIds: string[];
+  retreatRadiusM: number;
+  distanceToGoalM: number;
+  reason: string;
+  cardShown?: 'none' | 'yellow' | 'red';
+  countdownSec: number;
+  elapsedSec: number;
+}
+
+export const FREE_KICK_RETREAT_RADIUS_M = 8.5;
+export const FREE_KICK_WALL_DISTANCE_M = 8.5;
+export const FREE_KICK_DIRECT_RANGE_M = 28.0;
+
+export function createInitialFreeKickState(): FreeKickState {
+  return {
+    active: false,
+    stage: 'whistle_freeze',
+    awardedTeam: 'red',
+    spot: { x: 0, y: 0.42, z: 0 },
+    takerId: null,
+    takerName: '',
+    isHumanTaker: false,
+    isDirectRange: false,
+    wallSize: 0,
+    wallPlayerIds: [],
+    retreatRadiusM: FREE_KICK_RETREAT_RADIUS_M,
+    distanceToGoalM: 0,
+    reason: '',
+    cardShown: 'none',
+    countdownSec: 0,
+    elapsedSec: 0,
+  };
+}
+
+export const INITIAL_FREE_KICK_STATE: FreeKickState = createInitialFreeKickState();
+
+export type PenaltyKickOutcome = 'pending' | 'scored' | 'saved' | 'missed';
+
+export type PenaltyShootoutStage =
+  | 'intro'
+  | 'turn_setup'
+  | 'awaiting_kick'
+  | 'ball_in_flight'
+  | 'turn_result'
+  | 'sudden_death_banner'
+  | 'finished';
+
+export type PenaltyShootoutTurnRole = 'kicker' | 'goalkeeper' | 'spectator';
+
+export interface PenaltyShootoutState {
+  active: boolean;
+  stage: PenaltyShootoutStage;
+  round: number;
+  isSuddenDeath: boolean;
+  turnIndex: number;
+  kickingTeam: TeamId;
+  defendingTeam: TeamId;
+  humanTurnRole: PenaltyShootoutTurnRole;
+  shooterId: string | null;
+  shooterName: string;
+  gkId: string | null;
+  gkName: string;
+  rounds: Record<TeamId, PenaltyKickOutcome[]>;
+  shootoutScore: Record<TeamId, number>;
+  lastOutcome: PenaltyKickOutcome;
+  headline: string;
+  winner: TeamId | null;
+  shotTimerSec: number;
+  fromDraw: boolean;
+}
+
+export const PENALTY_SHOOTOUT_INITIAL_ROUNDS = 5;
+
+export function createInitialPenaltyShootoutState(): PenaltyShootoutState {
+  return {
+    active: false,
+    stage: 'intro',
+    round: 1,
+    isSuddenDeath: false,
+    turnIndex: 0,
+    kickingTeam: 'red',
+    defendingTeam: 'blue',
+    humanTurnRole: 'kicker',
+    shooterId: null,
+    shooterName: '',
+    gkId: null,
+    gkName: '',
+    rounds: {
+      red: ['pending', 'pending', 'pending', 'pending', 'pending'],
+      blue: ['pending', 'pending', 'pending', 'pending', 'pending'],
+    },
+    shootoutScore: { red: 0, blue: 0 },
+    lastOutcome: 'pending',
+    headline: '',
+    winner: null,
+    shotTimerSec: 0,
+    fromDraw: false,
+  };
+}
+
+export const INITIAL_PENALTY_SHOOTOUT_STATE: PenaltyShootoutState =
+  createInitialPenaltyShootoutState();
+
 /* ─────────────── v3 Rematch Feel & P2P Timing Constants ─────────────── */
 
 export const MIN_MOUSE_SENSITIVITY = 0.4;
@@ -281,6 +514,7 @@ export type GameCommand =
   | { type: 'move'; dx: number; dz: number }
   | { type: 'sprint'; active: boolean }
   | { type: 'pass' }
+  | { type: 'callForPass' }
   | { type: 'lobPass'; holdRatio?: number }
   | { type: 'knockOn' }
   | { type: 'shootStart' }
@@ -296,10 +530,12 @@ export type GameCommand =
   | { type: 'refYellowCard' }
   | { type: 'refRedCard' }
   | { type: 'refPenalty' }
+  | { type: 'refFreeKick'; forTeam?: TeamId; spot?: Vec3; reason?: string }
   | { type: 'refStartVAR'; reason?: string }
   | { type: 'refVARVerdict'; verdict: VARVerdict }
   | { type: 'coachSubToBench'; playerId: string }
   | { type: 'coachTactic'; team: TeamId; stance: TacticalStance }
+  | { type: 'triggerQueuedSubNow' }
   | { type: 'benchEmote'; kind: 'rage' | 'water' | 'shout' }
   | { type: 'benchRequestReturn' }
   | { type: 'spectatorCheer' }
@@ -311,7 +547,10 @@ export type GameCommand =
   | { type: 'sandboxSwitchRole'; role: RoleType; team?: TeamId; benchSelf?: boolean }
   | { type: 'setMouseSensitivity'; value: number }
   | { type: 'setGraphicsQuality'; quality: GraphicsQuality }
+  | { type: 'setAIDifficulty'; difficulty: AIDifficulty }
   | { type: 'startMatch' }
+  | { type: 'startPenaltyShootout'; fromDraw?: boolean }
+  | { type: 'shootoutKick'; dirX: -1 | 0 | 1; power?: number }
   | { type: 'restartMatch' }
   | { type: 'returnToLobby' }
   | { type: 'togglePause' }
@@ -321,6 +560,8 @@ export type ComedyEventTone =
   | 'goal'
   | 'card_yellow'
   | 'card_red'
+  | 'foul'
+  | 'shootout'
   | 'var'
   | 'bench'
   | 'dive'
@@ -385,6 +626,12 @@ export interface WorldSnapshotPacket {
   tactics: Record<TeamId, TacticalStance>;
   varState: VARState;
   goalReplayState: GoalReplayState;
+  dramaState?: MatchDramaState;
+  pendingSub?: PendingSubstitution | null;
+  callForPass?: CallForPassState;
+  freeKick?: FreeKickState;
+  penaltyShootout?: PenaltyShootoutState;
+  coachDiscipline?: CoachDisciplineStats;
   hitStopRemaining: number;
   guestStamina: number;
   guestShotCharge: number;

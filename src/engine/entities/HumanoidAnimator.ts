@@ -26,7 +26,7 @@ function lerp(a: number, b: number, t: number): number {
  * Drives a rigged Mixamo humanoid (`player_humanoid.glb`) using `THREE.AnimationMixer`
  * for base locomotion (`idle`, `walk`, `run`, `headShake`, `sad_pose`, `sneak_pose`, `agree`)
  * with smooth `0.16s` crossfades, layered with post-`mixer.update(dt)` procedural bone
- * rotations and body transforms covering all 19 `CharacterAnimState`s.
+ * rotations and body transforms covering all 25 `CharacterAnimState`s.
  */
 export class HumanoidAnimator {
   private readonly instance: ClonedHumanoidInstance;
@@ -199,6 +199,18 @@ export class HumanoidAnimator {
         break;
       case 'protest':
         this.transitionBaseClip('headShake', 1.35);
+        break;
+      case 'red_card_shock':
+        this.transitionBaseClip('headShake', 1.45);
+        break;
+      case 'walk_of_shame':
+        this.transitionBaseClip('walk', 0.85);
+        break;
+      case 'sub_walk_off':
+        this.transitionBaseClip('walk', 0.95);
+        break;
+      case 'sub_enter_pitch':
+        this.transitionBaseClip('run', 1.25);
         break;
       case 'dive_flop':
         if (t >= 0.62) {
@@ -425,55 +437,170 @@ export class HumanoidAnimator {
         break;
       }
 
-      case 'gk_dive_left': {
-        // Full horizontal lateral dive to character's LEFT (+X -> negative bodyRotZ)
-        blendSpeed = 26;
-        const airArc = Math.sin(Math.min(t / 0.65, 1) * Math.PI);
-        this.targetBodyPos.set(0.35, 0.44 + airArc * 0.55, 0);
-        this.targetBodyRot.set(0, 0, -1.46);
-        this.setBoneOverride('Head', 0, 0, 0.45, 0.95, true);
-        // Both gloved hands fully extended overhead toward ball
-        this.setBoneOverride('LeftArm', 0, -0.18, 1.48, 1.0, true);
-        this.setBoneOverride('RightArm', 0, 0.18, -1.42, 1.0, true);
-        this.setBoneOverride('LeftForeArm', 0, -0.08, 0, 1.0, true);
-        this.setBoneOverride('RightForeArm', 0, 0.08, 0, 1.0, true);
-        this.setBoneOverride('LeftUpLeg', 0.14, 0, 0.12, 0.95, true);
-        this.setBoneOverride('RightUpLeg', -0.18, 0, -0.08, 0.95, true);
-        this.setBoneOverride('RightLeg', 0.38, 0, 0, 0.95, true);
+      case 'gk_dive_left':
+      case 'gk_dive_right': {
+        // 3-phase athletic diving save: spring takeoff -> full-stretch airborne reach -> turf landing slide & push-up recovery
+        const dir = animState === 'gk_dive_left' ? 1 : -1;
+        blendSpeed = 28;
+        if (t < 0.14) {
+          // Phase 1 (0..0.14s): Explosive spring takeoff crouching slightly then launching laterally
+          const u = t / 0.14;
+          const spring = Math.sin(u * Math.PI * 0.5);
+          this.targetBodyPos.set(dir * lerp(0.06, 0.3, spring), lerp(-0.14, 0.34, spring), 0.04);
+          this.targetBodyRot.set(0.1, 0, -dir * lerp(0.24, 1.05, spring));
+          this.setBoneOverride('Spine1', lerp(0.24, 0.06, u), 0, dir * 0.14, 0.95, true);
+          this.setBoneOverride('Head', 0, dir * 0.16, dir * lerp(0.15, 0.42, u), 0.95, true);
+          // Arms thrusting explosively toward the corner
+          this.setBoneOverride('LeftArm', 0, -0.35, lerp(0.45, 1.42, spring), 1.0, true);
+          this.setBoneOverride('RightArm', 0, 0.35, lerp(-0.45, -1.42, spring), 1.0, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.45 * (1 - u), 0, 1.0, true);
+          this.setBoneOverride('RightForeArm', 0, 0.45 * (1 - u), 0, 1.0, true);
+          // Knees tucked for spring push-off
+          this.setBoneOverride('LeftUpLeg', -0.68, 0, 0.12, 0.95, true);
+          this.setBoneOverride('RightUpLeg', -0.68, 0, -0.12, 0.95, true);
+          this.setBoneOverride('LeftLeg', 1.18, 0, 0, 0.95, true);
+          this.setBoneOverride('RightLeg', 1.18, 0, 0, 0.95, true);
+        } else if (t < 0.52) {
+          // Phase 2 (0.14..0.52s): Full-stretch airborne horizontal reach!
+          const u = (t - 0.14) / 0.38;
+          const airArc = Math.sin(u * Math.PI) * 0.68;
+          this.targetBodyPos.set(dir * lerp(0.3, 0.56, u), 0.24 + airArc, 0.06);
+          this.targetBodyRot.set(0.04, 0, -dir * 1.48);
+          this.setBoneOverride('Spine1', -0.06, 0, dir * 0.08, 0.95, true);
+          this.setBoneOverride('Head', -0.08, dir * 0.22, dir * 0.52, 0.98, true);
+          // Both gloved hands fully extended straight toward the ball
+          this.setBoneOverride('LeftArm', 0, -0.14, dir > 0 ? 1.52 : 1.44, 1.0, true);
+          this.setBoneOverride('RightArm', 0, 0.14, dir > 0 ? -1.44 : -1.52, 1.0, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.05, 0, 1.0, true);
+          this.setBoneOverride('RightForeArm', 0, 0.05, 0, 1.0, true);
+          // Trailing leg extended cleanly, lead leg slightly bent for athletic silhouette
+          this.setBoneOverride('LeftUpLeg', dir > 0 ? -0.18 : 0.18, 0, 0.12, 0.95, true);
+          this.setBoneOverride('RightUpLeg', dir > 0 ? 0.18 : -0.18, 0, -0.12, 0.95, true);
+          this.setBoneOverride('LeftLeg', dir > 0 ? 0.36 : 0.06, 0, 0, 0.95, true);
+          this.setBoneOverride('RightLeg', dir > 0 ? 0.06 : 0.36, 0, 0, 0.95, true);
+        } else {
+          // Phase 3 (0.52s+): Turf landing slide (~0.24m) followed by quick athletic push-up/roll recovery
+          const w = t - 0.52;
+          const slideBounce = w < 0.24 ? Math.abs(Math.sin((w / 0.24) * Math.PI)) * 0.06 : 0;
+          const recover = Math.min(Math.max((w - 0.24) / 0.42, 0), 1);
+          this.targetBodyPos.set(dir * lerp(0.56, 0.42, recover), 0.24 + slideBounce + recover * 0.1, 0.06);
+          this.targetBodyRot.set(lerp(0.04, 0.38, recover), 0, -dir * lerp(1.52, 0.72, recover));
+          this.setBoneOverride('Spine1', lerp(0.08, 0.26, recover), 0, 0, 0.92, true);
+          this.setBoneOverride('Head', lerp(0, -0.24, recover), dir * 0.18 * (1 - recover), dir * lerp(0.45, 0.14, recover), 0.95, true);
+          // Bracing hands against turf to push back up
+          this.setBoneOverride('LeftArm', 0.12, lerp(-0.55, -1.05, recover), lerp(0.85, -0.35, recover), 0.98, true);
+          this.setBoneOverride('RightArm', 0.12, lerp(0.55, 1.05, recover), lerp(-0.85, 0.35, recover), 0.98, true);
+          this.setBoneOverride('LeftForeArm', 0, lerp(-0.45, -0.78, recover), 0, 0.95, true);
+          this.setBoneOverride('RightForeArm', 0, lerp(0.45, 0.78, recover), 0, 0.95, true);
+          // Knees tuck underneath for agile recovery
+          this.setBoneOverride('LeftUpLeg', lerp(-0.18, -0.82, recover), 0, 0.14, 0.95, true);
+          this.setBoneOverride('RightUpLeg', lerp(0.12, -0.68, recover), 0, -0.14, 0.95, true);
+          this.setBoneOverride('LeftLeg', lerp(0.42, 1.28, recover), 0, 0, 0.95, true);
+          this.setBoneOverride('RightLeg', lerp(0.24, 1.18, recover), 0, 0, 0.95, true);
+        }
         break;
       }
 
-      case 'gk_dive_right': {
-        // Full horizontal lateral dive to character's RIGHT (-X -> positive bodyRotZ)
-        blendSpeed = 26;
-        const airArc = Math.sin(Math.min(t / 0.65, 1) * Math.PI);
-        this.targetBodyPos.set(-0.35, 0.44 + airArc * 0.55, 0);
-        this.targetBodyRot.set(0, 0, 1.46);
-        this.setBoneOverride('Head', 0, 0, -0.45, 0.95, true);
-        this.setBoneOverride('LeftArm', 0, -0.18, 1.42, 1.0, true);
-        this.setBoneOverride('RightArm', 0, 0.18, -1.48, 1.0, true);
-        this.setBoneOverride('LeftForeArm', 0, -0.08, 0, 1.0, true);
-        this.setBoneOverride('RightForeArm', 0, 0.08, 0, 1.0, true);
-        this.setBoneOverride('LeftUpLeg', -0.18, 0, 0.08, 0.95, true);
-        this.setBoneOverride('RightUpLeg', 0.14, 0, -0.12, 0.95, true);
-        this.setBoneOverride('LeftLeg', 0.38, 0, 0, 0.95, true);
+      case 'gk_parry_left':
+      case 'gk_parry_right': {
+        // Dramatic high/wide fingertip parry deflection! Higher vault (~0.92m), arched torso, lead arm slap, turf roll
+        const dir = animState === 'gk_parry_left' ? 1 : -1;
+        blendSpeed = 30;
+        if (t < 0.12) {
+          // Phase 1 (0..0.12s): Explosive upward-lateral spring launch
+          const u = t / 0.12;
+          this.targetBodyPos.set(dir * lerp(0.04, 0.24, u), lerp(-0.12, 0.44, u), 0.05);
+          this.targetBodyRot.set(-0.08, dir * 0.12, -dir * lerp(0.18, 0.88, u));
+          this.setBoneOverride('Spine1', -0.14, 0, dir * 0.12, 0.95, true);
+          this.setBoneOverride('LeftUpLeg', -0.62, 0, 0.1, 0.95, true);
+          this.setBoneOverride('RightUpLeg', -0.62, 0, -0.1, 0.95, true);
+          this.setBoneOverride('LeftLeg', 1.15, 0, 0, 0.95, true);
+          this.setBoneOverride('RightLeg', 1.15, 0, 0, 0.95, true);
+          this.setBoneOverride('LeftArm', 0, -0.25, dir > 0 ? 1.45 : 0.35, 1.0, true);
+          this.setBoneOverride('RightArm', 0, 0.25, dir > 0 ? -0.35 : -1.45, 1.0, true);
+        } else if (t < 0.54) {
+          // Phase 2 (0.12..0.54s): Peak fingertip vault (~0.92m arc), arched torso, slapping ball over/wide
+          const u = (t - 0.12) / 0.42;
+          const airArc = Math.sin(u * Math.PI) * 0.92;
+          const slapPulse = Math.sin(Math.min(1, Math.max(0, (u - 0.22) / 0.44)) * Math.PI);
+          this.targetBodyPos.set(dir * lerp(0.24, 0.58, u), 0.26 + airArc, 0.08);
+          this.targetBodyRot.set(-0.14, dir * 0.18, -dir * 1.26);
+          this.setBoneOverride('Spine1', -0.22, dir * 0.16, dir * 0.16, 0.98, true);
+          this.setBoneOverride('Head', -0.28, dir * 0.24, dir * 0.42, 0.98, true);
+          if (dir > 0) {
+            // Left lead arm thrust maximally upward & outward with fingertip deflection slap
+            this.setBoneOverride('LeftArm', -0.1 * slapPulse, -0.1 + slapPulse * 0.24, 1.56 + slapPulse * 0.14, 1.0, true);
+            this.setBoneOverride('LeftForeArm', 0, -0.04, 0, 1.0, true);
+            // Opposite right arm tucked/bracing for landing
+            this.setBoneOverride('RightArm', 0.15, 0.85, -0.28, 0.98, true);
+            this.setBoneOverride('RightForeArm', 0, 0.92, 0, 0.98, true);
+          } else {
+            // Right lead arm thrust maximally upward & outward with fingertip deflection slap
+            this.setBoneOverride('RightArm', -0.1 * slapPulse, 0.1 - slapPulse * 0.24, -1.56 - slapPulse * 0.14, 1.0, true);
+            this.setBoneOverride('RightForeArm', 0, 0.04, 0, 1.0, true);
+            // Opposite left arm tucked/bracing for landing
+            this.setBoneOverride('LeftArm', 0.15, -0.85, 0.28, 0.98, true);
+            this.setBoneOverride('LeftForeArm', 0, -0.92, 0, 0.98, true);
+          }
+          // Dynamic split-leg athletic air silhouette
+          this.setBoneOverride('LeftUpLeg', dir > 0 ? -0.32 : 0.26, 0, 0.14, 0.95, true);
+          this.setBoneOverride('RightUpLeg', dir > 0 ? 0.26 : -0.32, 0, -0.14, 0.95, true);
+          this.setBoneOverride('LeftLeg', dir > 0 ? 0.62 : 0.14, 0, 0, 0.95, true);
+          this.setBoneOverride('RightLeg', dir > 0 ? 0.14 : 0.62, 0, 0, 0.95, true);
+        } else {
+          // Phase 3 (0.54s+): Dynamic turf shoulder roll recovery
+          const w = t - 0.54;
+          const rollU = Math.min(w / 0.45, 1);
+          const hop = Math.sin(rollU * Math.PI) * 0.09;
+          this.targetBodyPos.set(dir * lerp(0.58, 0.46, rollU), 0.24 + hop, 0.08);
+          this.targetBodyRot.set(lerp(-0.14, 0.52, rollU), dir * lerp(0.18, -0.22, rollU), -dir * lerp(1.36, 0.85, rollU));
+          this.setBoneOverride('Spine1', lerp(-0.08, 0.34, rollU), 0, 0, 0.95, true);
+          this.setBoneOverride('Head', 0.18, 0, dir * lerp(0.32, 0.1, rollU), 0.95, true);
+          this.setBoneOverride('LeftArm', 0.15, -0.95, lerp(0.65, -0.32, rollU), 0.98, true);
+          this.setBoneOverride('RightArm', 0.15, 0.95, lerp(-0.65, 0.32, rollU), 0.98, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.88, 0, 0.95, true);
+          this.setBoneOverride('RightForeArm', 0, 0.88, 0, 0.95, true);
+          this.setBoneOverride('LeftUpLeg', lerp(-0.35, -0.88, rollU), 0, 0.14, 0.95, true);
+          this.setBoneOverride('RightUpLeg', lerp(-0.22, -0.78, rollU), 0, -0.14, 0.95, true);
+          this.setBoneOverride('LeftLeg', lerp(0.68, 1.32, rollU), 0, 0, 0.95, true);
+          this.setBoneOverride('RightLeg', lerp(0.55, 1.24, rollU), 0, 0, 0.95, true);
+        }
         break;
       }
 
       case 'gk_catch': {
-        // Athletic crouch clutching ball securely against chest
-        blendSpeed = 24;
-        this.targetBodyPos.y = -0.16;
-        this.setBoneOverride('Spine', 0.24, 0, 0, 0.95, true);
-        this.setBoneOverride('LeftUpLeg', -0.52, 0, 0.18, 0.95, true);
-        this.setBoneOverride('RightUpLeg', -0.52, 0, -0.18, 0.95, true);
-        this.setBoneOverride('LeftLeg', 0.92, 0, 0, 0.95, true);
-        this.setBoneOverride('RightLeg', 0.92, 0, 0, 0.95, true);
-        // Arms scooping inward in front of chest
-        this.setBoneOverride('LeftArm', 0.1, -1.15, -0.52, 1.0, true);
-        this.setBoneOverride('RightArm', 0.1, 1.15, 0.52, 1.0, true);
-        this.setBoneOverride('LeftForeArm', 0, -1.05, 0, 1.0, true);
-        this.setBoneOverride('RightForeArm', 0, 1.05, 0, 1.0, true);
+        // Snappy catch-impact absorption recoil (0..0.18s) followed by secure ball-hugging athletic stance
+        blendSpeed = 28;
+        if (t < 0.18) {
+          const u = t / 0.18;
+          const impact = Math.sin(u * Math.PI);
+          this.targetBodyPos.set(0, lerp(-0.05, -0.24, impact), -impact * 0.08);
+          this.setBoneOverride('Spine', lerp(0.16, 0.34, impact), 0, 0, 0.96, true);
+          this.setBoneOverride('Head', 0.14, 0, 0, 0.92, true);
+          this.setBoneOverride('LeftUpLeg', lerp(-0.36, -0.66, impact), 0, 0.18, 0.96, true);
+          this.setBoneOverride('RightUpLeg', lerp(-0.36, -0.66, impact), 0, -0.18, 0.96, true);
+          this.setBoneOverride('LeftLeg', lerp(0.62, 1.14, impact), 0, 0, 0.96, true);
+          this.setBoneOverride('RightLeg', lerp(0.62, 1.14, impact), 0, 0, 0.96, true);
+          // Hands snap ball firmly from extended catch into chest
+          this.setBoneOverride('LeftArm', 0.1, lerp(-0.92, -1.24, u), lerp(-0.36, -0.58, u), 1.0, true);
+          this.setBoneOverride('RightArm', 0.1, lerp(0.92, 1.24, u), lerp(0.36, 0.58, u), 1.0, true);
+          this.setBoneOverride('LeftForeArm', 0, lerp(-0.62, -1.18, u), 0, 1.0, true);
+          this.setBoneOverride('RightForeArm', 0, lerp(0.62, 1.18, u), 0, 1.0, true);
+        } else {
+          const breath = Math.sin((t - 0.18) * 4.2) * 0.025;
+          this.targetBodyPos.y = -0.16 + breath;
+          this.setBoneOverride('Spine', 0.24, 0, 0, 0.95, true);
+          this.setBoneOverride('Head', -0.06, Math.sin((t - 0.18) * 2.4) * 0.22, 0, 0.9, true);
+          this.setBoneOverride('LeftUpLeg', -0.52, 0, 0.18, 0.95, true);
+          this.setBoneOverride('RightUpLeg', -0.52, 0, -0.18, 0.95, true);
+          this.setBoneOverride('LeftLeg', 0.92, 0, 0, 0.95, true);
+          this.setBoneOverride('RightLeg', 0.92, 0, 0, 0.95, true);
+          // Securely hugging ball tight against chest
+          this.setBoneOverride('LeftArm', 0.12, -1.2, -0.56, 1.0, true);
+          this.setBoneOverride('RightArm', 0.12, 1.2, 0.56, 1.0, true);
+          this.setBoneOverride('LeftForeArm', 0, -1.16, 0, 1.0, true);
+          this.setBoneOverride('RightForeArm', 0, 1.16, 0, 1.0, true);
+        }
         break;
       }
 
@@ -551,6 +678,139 @@ export class HumanoidAnimator {
         this.setBoneOverride('LeftForeArm', 0, -0.42, 0, 1.0, true);
         this.setBoneOverride('RightForeArm', 0, 0.42, 0, 1.0, true);
         this.setBoneOverride('Head', Math.sin(t * 5) * 0.1, 0, 0, 0.8, true);
+        break;
+      }
+
+      case 'red_card_shock': {
+        // Pure Egyptian football drama! Phase 1: grab head in disbelief; Phase 2: furious pleading & hops
+        blendSpeed = 26;
+        if (t < 0.38) {
+          const u = Math.min(t / 0.22, 1);
+          this.targetBodyPos.y = -0.1 * u;
+          this.setBoneOverride('Spine1', -0.22 * u, 0, 0, 0.96, true);
+          this.setBoneOverride('Head', -0.26 * u, Math.sin(t * 14) * 0.18, 0, 0.92, false);
+          // Knees buckle slightly in disbelief
+          this.setBoneOverride('LeftUpLeg', -0.38 * u, 0, 0.1, 0.9, true);
+          this.setBoneOverride('RightUpLeg', -0.38 * u, 0, -0.1, 0.9, true);
+          this.setBoneOverride('LeftLeg', 0.68 * u, 0, 0, 0.9, true);
+          this.setBoneOverride('RightLeg', 0.68 * u, 0, 0, 0.9, true);
+          // Both hands fly up to grab head!
+          this.setBoneOverride('LeftArm', 0.12, -0.58, lerp(-0.2, 1.18, u), 1.0, true);
+          this.setBoneOverride('RightArm', 0.12, 0.58, lerp(0.2, -1.18, u), 1.0, true);
+          this.setBoneOverride('LeftForeArm', 0, -1.58 * u, 0.25 * u, 1.0, true);
+          this.setBoneOverride('RightForeArm', 0, 1.58 * u, -0.25 * u, 1.0, true);
+        } else {
+          const w = t - 0.38;
+          const hop = Math.abs(Math.sin(w * 10.5));
+          const plead = Math.sin(w * 8.5);
+          const wideOpen = plead > 0 ? 1 : 0;
+          this.targetBodyPos.y = hop * 0.2;
+          this.setBoneOverride('Spine1', 0.12 + Math.abs(plead) * 0.08, plead * 0.24, plead * 0.12, 0.92, true);
+          this.setBoneOverride('Head', -0.06, Math.sin(w * 18) * 0.44, 0, 0.85, false);
+          if (wideOpen) {
+            // Wide-open "I didn't touch him!!" arm spread
+            this.setBoneOverride('LeftArm', 0.15, -0.35 + plead * 0.2, 0.42 + plead * 0.25, 1.0, true);
+            this.setBoneOverride('RightArm', 0.15, 0.35 + plead * 0.2, -0.42 - plead * 0.25, 1.0, true);
+            this.setBoneOverride('LeftForeArm', 0, -0.38, 0.22, 0.95, true);
+            this.setBoneOverride('RightForeArm', 0, 0.38, -0.22, 0.95, true);
+          } else {
+            // Pointing incredulously at own chest ("ME?!")
+            this.setBoneOverride('LeftArm', 0.1, -1.18, -0.32, 1.0, true);
+            this.setBoneOverride('RightArm', 0.1, 1.18, 0.32, 1.0, true);
+            this.setBoneOverride('LeftForeArm', 0, -1.35, 0, 1.0, true);
+            this.setBoneOverride('RightForeArm', 0, 1.35, 0, 1.0, true);
+          }
+          this.setBoneOverride('LeftLeg', hop * 0.45, 0, 0, 0.72, false);
+          this.setBoneOverride('RightLeg', hop * 0.45, 0, 0, 0.72, false);
+        }
+        break;
+      }
+
+      case 'walk_of_shame': {
+        // Hilarious slow angry stomp off the pitch layered over 0.85x `walk` clip!
+        blendSpeed = 18;
+        const stomp = Math.sin(t * 5.2);
+        const lookBack = Math.sin(t * 2.6) > 0.55;
+        const airKick = Math.sin(t * 1.9 + 1.4) > 0.76;
+        this.targetBodyPos.y = Math.abs(stomp) * 0.08 - 0.03;
+        this.targetBodyRot.z = stomp * 0.075;
+        // Heavy slumped shoulders
+        this.setBoneOverride('Spine', 0.2, 0, 0, 0.85, false);
+        this.setBoneOverride('Spine1', 0.18, lookBack ? 0.42 : 0, 0, 0.88, false);
+        if (lookBack) {
+          // Glancing angrily over shoulder & flinging right arm back at referee/crowd
+          this.setBoneOverride('Head', -0.08, 1.02, 0, 0.95, true);
+          this.setBoneOverride('RightArm', 0.1, -0.58, -0.62 + Math.sin(t * 18) * 0.18, 1.0, true);
+          this.setBoneOverride('RightForeArm', 0, 0.25, 0, 0.95, true);
+          this.setBoneOverride('LeftArm', 0.12, -0.45, -0.78, 0.92, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.45, 0, 0.9, true);
+        } else if (airKick) {
+          // Frustrated fist-shake + angry air-kick!
+          this.setBoneOverride('Head', 0.16, Math.sin(t * 16) * 0.28, 0, 0.92, true);
+          this.setBoneOverride('LeftArm', 0, -0.95, 0.62 + Math.sin(t * 26) * 0.25, 1.0, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.85, 0, 0.95, true);
+          this.setBoneOverride('RightArm', 0.1, 0.35, 0.72, 0.92, true);
+          this.setBoneOverride('RightUpLeg', -0.78, 0, -0.06, 0.82, true);
+          this.setBoneOverride('RightLeg', 0.18, 0, 0, 0.82, true);
+        } else {
+          // Heavy furious stomp arms stiff at sides
+          this.setBoneOverride('Head', 0.22, Math.sin(t * 6.5) * 0.22, 0, 0.9, true);
+          this.setBoneOverride('LeftArm', 0.1, -0.25 + stomp * 0.32, -0.78, 0.9, true);
+          this.setBoneOverride('RightArm', 0.1, 0.25 + stomp * 0.32, 0.78, 0.9, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.45, 0, 0.88, true);
+          this.setBoneOverride('RightForeArm', 0, 0.45, 0, 0.88, true);
+        }
+        break;
+      }
+
+      case 'sub_walk_off': {
+        // Reluctant comedic trudge toward dugout layered over 0.95x `walk` clip!
+        blendSpeed = 18;
+        const shrugPhase = Math.sin(t * 2.4) >= 0;
+        const headShake = Math.sin(t * 7.8) * 0.36;
+        this.setBoneOverride('Spine1', 0.16, 0, Math.sin(t * 3.8) * 0.05, 0.85, false);
+        this.setBoneOverride('Head', 0.14, headShake, 0, 0.92, true);
+        if (shrugPhase) {
+          // Shrugging shoulders palms-up ("Why are you subbing ME?!")
+          const lift = Math.abs(Math.sin(t * 4.8)) * 0.18;
+          this.setBoneOverride('LeftArm', 0.18, -0.48, -0.28 + lift, 0.98, true);
+          this.setBoneOverride('RightArm', 0.18, 0.48, 0.28 - lift, 0.98, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.92, 0.28, 0.96, true);
+          this.setBoneOverride('RightForeArm', 0, 0.92, -0.28, 0.96, true);
+        } else {
+          // Waving dismissively toward coach while trudging off
+          const wave = Math.sin(t * 14) * 0.38;
+          this.setBoneOverride('RightArm', 0.08, 0.35 + wave, -0.24, 0.98, true);
+          this.setBoneOverride('RightForeArm', 0, 0.42, 0, 0.95, true);
+          this.setBoneOverride('LeftArm', 0.12, -0.28, -0.82, 0.9, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.35, 0, 0.88, true);
+        }
+        break;
+      }
+
+      case 'sub_enter_pitch': {
+        // Hyped-up reserve sprinting onto pitch layered over 1.25x `run` clip!
+        blendSpeed = 24;
+        const hop = Math.abs(Math.sin(t * 11.5));
+        const cycle = t % 1.4;
+        this.targetBodyPos.y = hop * 0.22;
+        this.setBoneOverride('Spine1', 0.14, 0, 0, 0.85, false);
+        this.setBoneOverride('Head', -0.14, 0, 0, 0.88, true);
+        if (cycle < 0.72) {
+          // Energetic chest-thump / double-clap while sprinting in!
+          const clap = Math.abs(Math.sin(t * 16));
+          this.setBoneOverride('LeftArm', 0.08, -1.24, -0.28, 0.98, true);
+          this.setBoneOverride('RightArm', 0.08, 1.24, 0.28, 0.98, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.88 - clap * 0.62, 0, 0.98, true);
+          this.setBoneOverride('RightForeArm', 0, 0.88 + clap * 0.62, 0, 0.98, true);
+        } else {
+          // Hyped double fist-pump celebrating pitch entry!
+          const pump = Math.sin(t * 18) * 0.24;
+          this.setBoneOverride('LeftArm', 0, -0.35, 0.96 + pump, 0.98, true);
+          this.setBoneOverride('RightArm', 0, 0.35, -0.96 - pump, 0.98, true);
+          this.setBoneOverride('LeftForeArm', 0, -0.45, 0, 0.95, true);
+          this.setBoneOverride('RightForeArm', 0, 0.45, 0, 0.95, true);
+        }
         break;
       }
 

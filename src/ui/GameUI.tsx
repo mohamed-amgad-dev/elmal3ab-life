@@ -3,6 +3,7 @@ import type { MatchPhase } from '../types/game';
 import MainMenu from './MainMenu';
 import LobbyScreen from './LobbyScreen';
 import GameHUD from './GameHUD';
+import SetPieceHUD from './SetPieceHUD';
 import FullTimeModal from './FullTimeModal';
 import PauseModal from './PauseModal';
 import ControlsHelpModal from './ControlsHelpModal';
@@ -11,8 +12,12 @@ const MATCH_PHASES: MatchPhase[] = [
   'kickoff',
   'playing',
   'paused_whistle',
+  'free_kick_setup',
   'penalty_setup',
+  'penalty_shootout',
   'var_review',
+  'red_card_drama',
+  'substitution_stoppage',
   'goal_celebration',
   'goal_replay',
 ];
@@ -34,6 +39,7 @@ export function GameUI() {
       {phase === 'menu' && <MainMenu />}
       {phase === 'lobby' && <LobbyScreen />}
       {inMatch && <GameHUD />}
+      {inMatch && <SetPieceHUD />}
       {inMatch && isPaused && <PauseModal />}
       {phase === 'full_time' && <FullTimeModal />}
       {isControlsOpen && <ControlsHelpModal />}

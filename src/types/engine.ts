@@ -49,11 +49,15 @@ export interface ICharacterSystem {
   dispose(): void;
 }
 
+export type GKDiveHeight = 'low' | 'mid' | 'high';
+
 export interface BallTickResult {
   goalScored: TeamId | null;
   hitPost: boolean;
   bounced: boolean;
   speed: number;
+  /** True when the ball strikes a sideline or endline cushion outside the goal mouth (triggers queued substitution stoppage). */
+  hitTouchline?: boolean;
 }
 
 export interface IBallPhysics {
@@ -114,6 +118,8 @@ export interface AimingGuideParams {
   passTargetPos: Vec3 | null;
   teamColor: number;
   elapsed: number;
+  isSetPiece?: boolean;
+  isCallForPassActive?: boolean;
 }
 
 export interface IAimingGuide {
@@ -146,6 +152,9 @@ export interface ISoundEngine {
   playBenchBuzzer(): void;
   playDiveWhoosh(): void;
   playFireworks(): void;
+  playPassCall?(): void;
+  playWallSpray?(): void;
+  playShootoutTension?(): void;
   dispose(): void;
 }
 

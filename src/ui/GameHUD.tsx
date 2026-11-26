@@ -12,6 +12,7 @@ import SpectatorControlsBar from './SpectatorControlsBar';
 import QuickRoleSwitcher from './QuickRoleSwitcher';
 import GoalReplayBanner from './GoalReplayBanner';
 import QuickChatWheel from './QuickChatWheel';
+import MatchDramaOverlay from './MatchDramaOverlay';
 
 function GoalBanner() {
   const phase = useGameStore((s) => s.phase);
@@ -45,7 +46,7 @@ export default function GameHUD() {
   const inVAR = varActive || phase === 'var_review';
 
   const roleHUD = (() => {
-    if (inVAR || phase === 'goal_replay') return null; // keep slow-mo replay cinematic
+    if (inVAR || phase === 'goal_replay' || phase === 'penalty_shootout') return null; // keep replay & shootout clean
     if (benched) return <BenchEmoteBar />;
     switch (role) {
       case 'outfield':
@@ -64,13 +65,14 @@ export default function GameHUD() {
   return (
     <div className="absolute inset-0">
       <Scoreboard />
+      <MatchDramaOverlay />
       <ComedyToastFeed />
       {roleHUD}
-      {role === 'coach' && !benched && phase !== 'goal_replay' && <CoachBenchPanel />}
+      {role === 'coach' && !benched && phase !== 'goal_replay' && phase !== 'penalty_shootout' && <CoachBenchPanel />}
       <GoalReplayBanner />
       <QuickChatWheel />
       <GoalBanner />
-      {phase !== 'goal_replay' && <QuickRoleSwitcher />}
+      {phase !== 'goal_replay' && phase !== 'penalty_shootout' && <QuickRoleSwitcher />}
       <VAROverlay />
     </div>
   );

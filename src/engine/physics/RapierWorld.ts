@@ -32,6 +32,7 @@ export function initRapier(): Promise<typeof RAPIER> {
 export interface RapierStepEvents {
   hitPost: boolean;
   bounced: boolean;
+  hitTouchline: boolean;
   deflectedByPlayerId: string | null;
 }
 
@@ -262,6 +263,7 @@ export class RapierPhysicsWorld {
     const out: RapierStepEvents = {
       hitPost: false,
       bounced: false,
+      hitTouchline: false,
       deflectedByPlayerId: null,
     };
     if (this.disposed) return out;
@@ -311,6 +313,7 @@ export class RapierPhysicsWorld {
           out.hitPost = true;
         } else if (this.wallHandles.has(other)) {
           out.bounced = true;
+          out.hitTouchline = true;
         } else if (other === this.groundHandle) {
           const curVel = this.ballBody.linvel();
           if (Math.abs(curVel.y) > 2.2) {

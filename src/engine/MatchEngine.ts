@@ -4,11 +4,18 @@ import { CameraDirector, type GKDiveVisualState } from './cameras/CameraDirector
 import { ReplayRecorder } from './cameras/ReplayRecorder';
 import { InputManager } from './controllers/InputManager';
 import { CoachAI } from './ai/CoachAI';
-import { GoalkeeperAI } from './ai/GoalkeeperAI';
-import { OutfieldAI } from './ai/OutfieldAI';
-import { RefereeAI, type RefereeIncident } from './ai/RefereeAI';
+import type { CoachSubTrigger } from './ai/CoachDiscipline';
+import { GoalkeeperAI, getGoalkeeperProfile } from './ai/GoalkeeperAI';
+import { OutfieldAI, getOutfieldSpeedProfile } from './ai/OutfieldAI';
+import { RefereeAI, type RefereeCardLevel, type RefereeIncident } from './ai/RefereeAI';
+import { FreeKickDirector, type FreeKickPlayerProxy } from './setpieces/FreeKickDirector';
+import {
+  PenaltyShootoutDirector,
+  type ShootoutPlayerProxy,
+} from './setpieces/PenaltyShootoutDirector';
 import { useGameStore } from '../store/useGameStore';
 import type {
+  GKDiveHeight,
   IAimingGuide,
   IBallPhysics,
   ICharacterSystem,
@@ -20,6 +27,7 @@ import type {
   QuickChatNetworkEvent,
 } from '../types/engine';
 import {
+  CALL_FOR_PASS_COOLDOWN_SEC,
   DEFAULT_GUEST_SLOT,
   GOAL_REPLAY_DURATION_SEC,
   GUEST_INPUT_HZ,
@@ -27,12 +35,18 @@ import {
   GUEST_SNAP_DISTANCE_M,
   HIT_STOP_DURATION_SEC,
   HOST_SNAPSHOT_HZ,
+  INITIAL_CALL_FOR_PASS_STATE,
   INITIAL_GOAL_REPLAY_STATE,
+  INITIAL_MATCH_DRAMA_STATE,
   KNOCK_ON_PUSH_M,
   KNOCK_ON_SPEED_BOOST,
+  createInitialCoachDisciplineStats,
+  createInitialFreeKickState,
+  createInitialPenaltyShootoutState,
   getQuickChatPhrase,
   resolveDualHumanSlotConflict,
   type AdminRules,
+  type CallForPassState,
   type CameraMode,
   type CharacterAnimState,
   type ComedyEvent,
@@ -44,9 +58,11 @@ import {
   type HumanSlotConfig,
   type LobbySyncPacket,
   type MatchAward,
+  type MatchDramaState,
   type MatchPhase,
   type NetworkMode,
   type OutfieldPosition,
+  type PendingSubstitution,
   type PlayerEntityState,
   type RoleType,
   type ShotPrecisionZone,
@@ -87,6 +103,10 @@ interface EntityRuntime {
   knockOnBoostTimer: number;
   gkDiveState: GKDiveVisualState;
   gkDiveDirVec: Vec3;
+  gkDiveTargetX: number | null;
+  gkDiveSpeed: number;
+  gkPreferParry: boolean;
+  gkDiveHeight: GKDiveHeight;
   slideDirVec: Vec3;
   slideTimer: number;
   jukeImmuneTimer: number;
@@ -120,6 +140,24 @@ interface VARContext {
   replayElapsed: number;
   savedLivePoses: Map<string, { pos: Vec3; rotY: number; animState: CharacterAnimState }>;
   savedBallPos: Vec3;
+}
+
+interface DramaContext {
+  kind: 'red_card' | 'substitution';
+  stageTimer: number;
+  midShoutDone: boolean;
+  offenderId?: string;
+  outPlayerId?: string;
+  inPlayerId?: string;
+  refId?: string | null;
+  team: TeamId;
+  benchSlotIndex: number;
+  benchSeatPos: Vec3;
+  touchlineExitPos: Vec3;
+  tacticalEntryPos: Vec3;
+  requestedByHumanBench?: boolean;
+  actor?: HumanActor;
+  previousCamera: CameraMode;
 }
 
 const RED_OUTFIELD_ROSTER: Array<{ name: string; number: number; posRole: OutfieldPosition }> = [
@@ -167,6 +205,24 @@ function lerpAngle(a: number, b: number, t: number): number {
   return a + diff * t;
 }
 
+function closestPointOnSeg3D(a: Vec3, b: Vec3, p: Vec3): Vec3 {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abz = b.z - a.z;
+  const lenSq = abx * abx + aby * aby + abz * abz;
+  if (lenSq < 1e-8) return { x: a.x, y: a.y, z: a.z };
+  const t = clamp(
+    ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / lenSq,
+    0,
+    1
+  );
+  return {
+    x: a.x + abx * t,
+    y: a.y + aby * t,
+    z: a.z + abz * t,
+  };
+}
+
 /**
  * Core simulation orchestrator for ElMal3abLife (الملعب لايف).
  * Connects stadium, 3D characters, arcade ball physics, particles, procedural audio,
@@ -191,6 +247,8 @@ export class MatchEngine implements IMatchEngine {
   private readonly gkAI = new GoalkeeperAI();
   private readonly refAI = new RefereeAI();
   private readonly coachAI = new CoachAI();
+  private readonly freeKickDirector: FreeKickDirector;
+  private readonly penaltyShootoutDirector: PenaltyShootoutDirector;
 
   private readonly unsubCommandBus: () => void;
   private networkManager: INetworkManager | null = null;
@@ -286,6 +344,19 @@ export class MatchEngine implements IMatchEngine {
   private pendingIncident: RefereeIncident | null = null;
   private penaltyCtx: PenaltyContext | null = null;
   private varCtx: VARContext | null = null;
+  private pendingSub: PendingSubstitution | null = null;
+  private pendingSubWaitSec = 0;
+  private dramaState: MatchDramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+  private dramaCtx: DramaContext | null = null;
+  private callForPass: CallForPassState = { ...INITIAL_CALL_FOR_PASS_STATE };
+  private lastPasserId: string | null = null;
+  private lastPassReceiverNotifiedId: string | null = null;
+  private matchElapsedSec = 0;
+  private postRedCardResume:
+    | { kind: 'freeKick'; forTeam: TeamId; spot: Vec3; reason: string }
+    | { kind: 'penalty'; forTeam: TeamId; reason: string }
+    | null = null;
+  private debugBridgeRef: unknown = null;
   private awards: MatchAward[] = [];
   private crowdExcitement = 0.25;
 
@@ -307,6 +378,171 @@ export class MatchEngine implements IMatchEngine {
       onUserGesture: () => this.rawSound.unlock(),
     });
 
+    this.freeKickDirector = new FreeKickDirector({
+      getConfig: () => this.stadium.config,
+      getPlayers: (): FreeKickPlayerProxy[] => this.entities.map((rt) => rt.entity),
+      setPhase: (phase) => {
+        this.phase = phase;
+        if (phase === 'free_kick_setup') {
+          this.inputManager.exitPointerLock();
+        }
+      },
+      placeDeadBall: (pos) => {
+        this.ball.setFrozen(false);
+        this.ball.setPositionAndStop(pos);
+      },
+      clearPossession: () => {
+        this.possessorId = null;
+        this.gkCaughtById = null;
+      },
+      kickBall: (takerId, dir, power, lift, curlSpinY, isSuperShot) => {
+        const rt = this.entities.find((e) => e.entity.id === takerId);
+        if (!rt) return;
+        this.lastPasserId = takerId;
+        this.lastPassReceiverNotifiedId = null;
+        if (Math.abs(curlSpinY) > 0.01) {
+          this.performKickWithSpin(rt, dir, power, lift, curlSpinY, isSuperShot);
+        } else {
+          this.performKick(rt, dir, power, lift, isSuperShot);
+        }
+        if (this.callForPass.active && this.callForPass.callerTeam === rt.entity.team) {
+          this.callForPass = {
+            ...this.callForPass,
+            active: false,
+            remainingSec: 0,
+            cooldownSec: CALL_FOR_PASS_COOLDOWN_SEC,
+          };
+        }
+      },
+      playWhistle: (type) => this.sound.playWhistle(type),
+      playWallSpray: () => this.sound.playWallSpray?.(),
+      setSpeech: (playerId, text, durationSec) => {
+        const rt = this.entities.find((e) => e.entity.id === playerId);
+        if (rt) this.setSpeech(rt, text, durationSec);
+      },
+      pushEvent: (text, icon, tone) => this.pushEvent(text, icon, tone),
+      setJumbotronHeadline: (text, durationSec) => this.setJumbotronHeadline(text, durationSec),
+      setPlayerVelocityZero: (playerId) => {
+        const rt = this.entities.find((e) => e.entity.id === playerId);
+        if (rt) {
+          rt.vx = 0;
+          rt.vz = 0;
+          rt.slideTimer = 0;
+          rt.knockbackTimer = 0;
+        }
+      },
+      getCallForPassTargetId: (team) =>
+        this.callForPass.active && this.callForPass.callerTeam === team
+          ? this.callForPass.callerId
+          : null,
+      onSyncStore: () => {
+        this.syncStoreImmediate();
+        this.broadcastWorldSnapshot();
+      },
+    });
+
+    this.penaltyShootoutDirector = new PenaltyShootoutDirector({
+      getConfig: () => this.stadium.config,
+      getPlayers: (): ShootoutPlayerProxy[] => this.entities.map((rt) => rt.entity),
+      getBallPos: () => this.ball.state.pos,
+      getBallVel: () => this.ball.state.vel,
+      setPhase: (phase) => {
+        this.phase = phase;
+        if (phase === 'penalty_shootout') {
+          this.inputManager.exitPointerLock();
+        }
+      },
+      placeDeadBall: (pos) => {
+        this.ball.setFrozen(false);
+        this.ball.setPositionAndStop(pos);
+      },
+      clearPossession: () => {
+        this.possessorId = null;
+        this.gkCaughtById = null;
+        this.isChargingShot = false;
+        this.shotCharge = 0;
+        this.guestIsChargingShot = false;
+        this.guestShotCharge = 0;
+      },
+      kickBall: (shooterId, dir, power, lift, curlSpinY, isSuperShot) => {
+        const rt = this.entities.find((e) => e.entity.id === shooterId);
+        if (!rt) return;
+        if (Math.abs(curlSpinY) > 0.01) {
+          this.performKickWithSpin(rt, dir, power, lift, curlSpinY, isSuperShot);
+        } else {
+          this.performKick(rt, dir, power, lift, isSuperShot);
+        }
+      },
+      triggerGKDive: (gkId, dir, diveTargetX) => {
+        const rt = this.entities.find((e) => e.entity.id === gkId);
+        if (!rt) return;
+        rt.gkDiveCooldown = 0;
+        this.performGKDive(rt, dir, { diveTargetX, diveSpeed: 10.6 });
+      },
+      deflectBall: (dir, power, lift, gkId, team) => {
+        this.ball.kick(dir, power, lift, false, gkId, team);
+        this.sound.playKick(0.76);
+        this.triggerHitStop(0.06);
+        this.effects.spawnBurst(this.ball.state.pos, 0x00e5ff, 24, 5.0);
+        this.cameraDirector.triggerShake(0.32, 0.24);
+      },
+      triggerGoalNetRipple: (side, impactPos) =>
+        this.stadium.triggerGoalNetRipple(side, impactPos),
+      triggerGoalCelebration: (scoringTeam) => {
+        this.stadium.triggerGoalCelebration(scoringTeam);
+        this.cameraDirector.triggerShake(0.5, 0.4);
+      },
+      triggerFireworks: () => {
+        this.sound.playFireworks();
+        this.stadium.triggerCrowdFireworks();
+        this.effects.spawnFireworks({ x: -10, y: 10, z: 28 }, 0xfbbf24);
+        this.effects.spawnFireworks({ x: 10, y: 12, z: 28 }, 0x00c2ff);
+      },
+      playWhistle: (type) => this.sound.playWhistle(type),
+      playGoalCelebration: () => this.sound.playGoalCelebration(),
+      playCrowdReaction: (type) => this.sound.playCrowdReaction(type),
+      playShootoutTension: () => this.sound.playShootoutTension?.(),
+      setSpeech: (playerId, text, durationSec) => {
+        const rt = this.entities.find((e) => e.entity.id === playerId);
+        if (rt) this.setSpeech(rt, text, durationSec);
+      },
+      pushEvent: (text, icon, tone) => this.pushEvent(text, icon, tone),
+      setJumbotronHeadline: (text, durationSec) => this.setJumbotronHeadline(text, durationSec),
+      setPlayerVelocityZero: (playerId) => {
+        const rt = this.entities.find((e) => e.entity.id === playerId);
+        if (rt) {
+          rt.vx = 0;
+          rt.vz = 0;
+          rt.slideTimer = 0;
+          rt.knockbackTimer = 0;
+          rt.gkDiveState = 'none';
+          rt.gkDiveTargetX = null;
+        }
+      },
+      setShootoutControl: (role, playerId) => {
+        this.assignActorControlTo('host', playerId);
+        if (role === 'kicker') {
+          this.activeCamera = 'player_third';
+          this.inputManager.setFreeYaw(0, 0.12);
+          this.humanAimDir = { x: 0, y: 0, z: 1 };
+        } else if (role === 'goalkeeper') {
+          this.activeCamera =
+            this.humanSlot.cameraMode === 'gk_first_person' ? 'gk_first_person' : 'player_third';
+          this.inputManager.resetMouseLook();
+        } else {
+          this.activeCamera = 'player_third';
+        }
+        this.cameraDirector.snapNextFrame();
+      },
+      onShootoutFinished: () => {
+        this.crowdExcitement = 1.0;
+      },
+      onSyncStore: () => {
+        this.syncStoreImmediate();
+        this.broadcastWorldSnapshot();
+      },
+    });
+
     this.unsubCommandBus = commandBus.subscribe((cmd) => {
       this.dispatchCommand(cmd);
     });
@@ -319,6 +555,7 @@ export class MatchEngine implements IMatchEngine {
     this.positionForKickoff();
     this.ball.reset({ x: 0, y: 0.22, z: 0 });
     this.updateStadiumJumbotron();
+    this.installDebugBridge();
     this.syncStoreImmediate();
   }
 
@@ -371,6 +608,18 @@ export class MatchEngine implements IMatchEngine {
       playFireworks: () => {
         raw.playFireworks();
         recordSfx('fireworks');
+      },
+      playPassCall: () => {
+        raw.playPassCall?.();
+        recordSfx('pass_call');
+      },
+      playWallSpray: () => {
+        raw.playWallSpray?.();
+        recordSfx('wall_spray');
+      },
+      playShootoutTension: () => {
+        raw.playShootoutTension?.();
+        recordSfx('shootout_tension');
       },
       dispose: () => raw.dispose(),
     };
@@ -442,6 +691,13 @@ export class MatchEngine implements IMatchEngine {
     this.inputManager.dispose();
     this.ball.setTrajectoryVisible(false);
     this.stadium.setVARActive(false);
+    if (typeof window !== 'undefined') {
+      const win = window as unknown as { __elmal3abDebug?: unknown };
+      if (win.__elmal3abDebug === this.debugBridgeRef) {
+        delete win.__elmal3abDebug;
+      }
+    }
+    this.debugBridgeRef = null;
   }
 
   dispatchCommand(cmd: GameCommand): void {
@@ -461,6 +717,13 @@ export class MatchEngine implements IMatchEngine {
         store.setGraphicsQuality(cmd.quality);
         this.stadium.setQuality?.(cmd.quality);
         this.onQualityChange?.(cmd.quality);
+        return;
+
+      case 'setAIDifficulty':
+        if (store.network.mode !== 'guest') {
+          store.setAIDifficulty(cmd.difficulty);
+          this.broadcastLobbySync();
+        }
         return;
 
       case 'toggleMute': {
@@ -487,10 +750,32 @@ export class MatchEngine implements IMatchEngine {
         this.startNewMatch();
         break;
 
+      case 'startPenaltyShootout':
+        this.startPenaltyShootoutMode(Boolean(cmd.fromDraw));
+        break;
+
+      case 'shootoutKick':
+        if (this.phase === 'penalty_shootout') {
+          this.penaltyShootoutDirector.executeHumanKick(cmd.dirX, cmd.power ?? 0.86);
+        }
+        break;
+
       case 'returnToLobby':
         this.isPaused = false;
         this.varCtx = null;
         this.penaltyCtx = null;
+        this.pendingSub = null;
+        this.pendingSubWaitSec = 0;
+        this.postRedCardResume = null;
+        this.matchElapsedSec = 0;
+        this.callForPass = { ...INITIAL_CALL_FOR_PASS_STATE };
+        this.lastPasserId = null;
+        this.lastPassReceiverNotifiedId = null;
+        this.freeKickDirector.reset();
+        this.penaltyShootoutDirector.reset();
+        this.coachAI.reset();
+        this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+        this.dramaCtx = null;
         this.hitStopRemaining = 0;
         this.goalReplayState = { ...INITIAL_GOAL_REPLAY_STATE };
         this.replayDisplayPlayers = null;
@@ -502,6 +787,7 @@ export class MatchEngine implements IMatchEngine {
         this.hideAimingGuide();
         this.inputManager.exitPointerLock();
         this.phase = 'lobby';
+        this.assignInitialHumanEntity();
         this.positionForKickoff();
         this.ball.reset({ x: 0, y: 0.42, z: 0 });
         this.updateStadiumJumbotron();
@@ -538,6 +824,10 @@ export class MatchEngine implements IMatchEngine {
         this.handleHumanPassOrTackle('host');
         break;
 
+      case 'callForPass':
+        this.handleCallForPass('host');
+        break;
+
       case 'lobPass':
         this.handleHumanLobPass(cmd.holdRatio ?? 0.5, 'host');
         break;
@@ -553,10 +843,22 @@ export class MatchEngine implements IMatchEngine {
         break;
 
       case 'shootStart':
-        if (
+        if (this.phase === 'penalty_shootout') {
+          const so = this.penaltyShootoutDirector.getState();
+          if (so.humanTurnRole === 'kicker' && so.stage === 'awaiting_kick') {
+            this.isChargingShot = true;
+            this.shotCharge = 0.08;
+            this.aimCurl = 0;
+          }
+        } else if (
           !this.humanSlot.isBenched &&
           this.humanSlot.role === 'outfield' &&
-          (this.phase === 'playing' || this.phase === 'penalty_setup')
+          (this.phase === 'playing' ||
+            (this.phase === 'penalty_setup' &&
+              this.penaltyCtx?.shooterId === this.controlledPlayerId) ||
+            (this.phase === 'free_kick_setup' &&
+              Boolean(this.controlledPlayerId) &&
+              this.freeKickDirector.isTaker(this.controlledPlayerId!)))
         ) {
           this.isChargingShot = true;
           this.shotCharge = 0.08;
@@ -565,7 +867,7 @@ export class MatchEngine implements IMatchEngine {
         break;
 
       case 'shootRelease':
-        if (this.isChargingShot) {
+        if (this.isChargingShot || this.phase === 'free_kick_setup') {
           this.handleHumanShootRelease('host');
           this.isChargingShot = false;
           this.shotCharge = 0;
@@ -590,7 +892,11 @@ export class MatchEngine implements IMatchEngine {
         break;
 
       case 'gkDive':
-        this.handleHumanGKDive(cmd.dir, 'host');
+        if (this.phase === 'penalty_shootout') {
+          this.penaltyShootoutDirector.executeHumanGKDive(cmd.dir);
+        } else {
+          this.handleHumanGKDive(cmd.dir, 'host');
+        }
         break;
 
       case 'gkThrow':
@@ -613,6 +919,10 @@ export class MatchEngine implements IMatchEngine {
         this.handleRefPenalty(rules);
         break;
 
+      case 'refFreeKick':
+        this.handleRefFreeKick(cmd.forTeam, cmd.spot, cmd.reason);
+        break;
+
       case 'refStartVAR':
         this.handleRefStartVAR(rules, cmd.reason);
         break;
@@ -627,6 +937,17 @@ export class MatchEngine implements IMatchEngine {
 
       case 'coachTactic':
         this.applyTeamTactic(cmd.team, cmd.stance, true);
+        break;
+
+      case 'triggerQueuedSubNow':
+        if (
+          this.pendingSub &&
+          (this.phase === 'playing' ||
+            this.phase === 'paused_whistle' ||
+            this.phase === 'kickoff')
+        ) {
+          this.beginSubstitutionStoppage('توقف اللعب — تبديل رسمي! 🏁🔄');
+        }
         break;
 
       case 'benchEmote':
@@ -776,6 +1097,73 @@ export class MatchEngine implements IMatchEngine {
       this.gkSaveGraceTimer = Math.max(0, this.gkSaveGraceTimer - dt);
     }
 
+    // Dedicated Dramatic Penalty Shootout simulation loop
+    if (this.phase === 'penalty_shootout') {
+      this.stepPenaltyShootout(dt, cameraDt);
+      return;
+    }
+
+    if (this.phase === 'red_card_drama') {
+      this.stepRedCardDrama(dt);
+      this.updateBallTrajectoryGuide();
+      this.hideAimingGuide();
+      this.characters.syncPlayers(
+        this.entities.map((e) => e.entity),
+        dt,
+        this.elapsed
+      );
+      this.effects.update(dt, this.ball.state.pos, false);
+      this.updateCameraAndVisuals(cameraDt);
+      this.hudSyncAccum += cameraDt;
+      if (this.hudSyncAccum >= 0.05) {
+        this.hudSyncAccum = 0;
+        this.syncStoreImmediate();
+      }
+      return;
+    }
+
+    if (this.phase === 'substitution_stoppage') {
+      this.stepSubstitutionStoppage(dt, rules);
+      this.updateBallTrajectoryGuide();
+      this.hideAimingGuide();
+      this.characters.syncPlayers(
+        this.entities.map((e) => e.entity),
+        dt,
+        this.elapsed
+      );
+      this.effects.update(dt, this.ball.state.pos, false);
+      this.updateCameraAndVisuals(cameraDt);
+      this.hudSyncAccum += cameraDt;
+      if (this.hudSyncAccum >= 0.05) {
+        this.hudSyncAccum = 0;
+        this.syncStoreImmediate();
+      }
+      return;
+    }
+
+    // Tick Call-for-Pass window & cooldown
+    if (
+      this.phase === 'playing' ||
+      this.phase === 'kickoff' ||
+      this.phase === 'free_kick_setup'
+    ) {
+      if (this.callForPass.active) {
+        this.callForPass.remainingSec = Math.max(0, this.callForPass.remainingSec - dt);
+        if (this.callForPass.remainingSec <= 0) {
+          this.callForPass.active = false;
+          this.callForPass.cooldownSec = CALL_FOR_PASS_COOLDOWN_SEC;
+        }
+      } else if (this.callForPass.cooldownSec > 0) {
+        this.callForPass.cooldownSec = Math.max(0, this.callForPass.cooldownSec - dt);
+      }
+    }
+
+    // Auto-trigger queued substitution if match entered kickoff or paused_whistle
+    if (this.pendingSub && (this.phase === 'paused_whistle' || this.phase === 'kickoff')) {
+      this.beginSubstitutionStoppage('توقف اللعب — تبديل رسمي! 🏁🔄');
+      return;
+    }
+
     if (this.phase === 'kickoff') {
       this.kickoffTimer -= dt;
       if (this.kickoffTimer <= 0) {
@@ -802,11 +1190,18 @@ export class MatchEngine implements IMatchEngine {
         return;
       }
     } else if (this.phase === 'playing') {
+      this.matchElapsedSec += dt;
+      this.coachAI.getDisciplineTracker().tick(dt);
       this.clockSec = Math.max(0, this.clockSec - dt);
       if (this.clockSec <= 0) {
         this.finishMatch();
         return;
       }
+      if (this.pendingSub) {
+        this.pendingSubWaitSec += dt;
+      }
+    } else if (this.phase === 'free_kick_setup') {
+      this.freeKickDirector.update(dt);
     } else if (this.phase === 'penalty_setup') {
       this.stepPenaltySetup(dt);
     }
@@ -837,6 +1232,8 @@ export class MatchEngine implements IMatchEngine {
       }
       if (rt.animLockTimer <= 0 && rt.gkDiveState !== 'none' && rt.gkDiveState !== 'catch') {
         rt.gkDiveState = 'none';
+        rt.gkDiveTargetX = null;
+        rt.gkPreferParry = false;
       }
     }
 
@@ -844,7 +1241,8 @@ export class MatchEngine implements IMatchEngine {
     const canMove =
       this.phase === 'playing' ||
       this.phase === 'paused_whistle' ||
-      this.phase === 'penalty_setup';
+      this.phase === 'penalty_setup' ||
+      (this.phase === 'free_kick_setup' && this.freeKickDirector.isReleasing());
 
     for (const rt of this.entities) {
       if (rt.entity.isBenched) {
@@ -852,7 +1250,7 @@ export class MatchEngine implements IMatchEngine {
         continue;
       }
       if (rt.entity.isSentOff) {
-        this.stepSentOffPlayer(rt);
+        this.stepSentOffPlayer(rt, dt);
         continue;
       }
       if (this.phase === 'goal_celebration') {
@@ -865,7 +1263,7 @@ export class MatchEngine implements IMatchEngine {
       } else if (rt.entity.role === 'referee') {
         this.stepRefereeEntity(rt, dt, rules);
       } else if (rt.entity.role === 'goalkeeper') {
-        this.stepGoalkeeperEntity(rt, dt, canMove);
+        this.stepGoalkeeperEntity(rt, dt, rules, canMove);
       } else if (rt.entity.role === 'outfield') {
         this.stepOutfieldEntity(rt, dt, rules, canMove);
       }
@@ -878,7 +1276,7 @@ export class MatchEngine implements IMatchEngine {
     this.stepKnockbackAndBodyCollisions(dt);
 
     // 5. Update ball physics + possession + GK catches/saves + goal detection
-    this.stepBallAndInteractions(dt);
+    this.stepBallAndInteractions(dt, rules);
 
     // 6. Compute nearest target for Referee HUD
     this.updateNearestRefTarget();
@@ -918,11 +1316,18 @@ export class MatchEngine implements IMatchEngine {
       this.syncStoreImmediate();
     }
 
-    // Keep bounds clamped for sanity
-    for (const rt of this.entities) {
-      if (rt.entity.role === 'outfield' && !rt.entity.isBenched && !rt.entity.isSentOff) {
-        rt.entity.pos.x = clamp(rt.entity.pos.x, -config.halfWidth + 0.7, config.halfWidth - 0.7);
-        rt.entity.pos.z = clamp(rt.entity.pos.z, -config.halfLength + 0.8, config.halfLength - 0.8);
+    // Keep bounds clamped for sanity (skip if a mid-tick event transitioned into a walk-off/entry stoppage or shootout!)
+    const currentPhase = this.phase as MatchPhase;
+    if (
+      currentPhase !== 'red_card_drama' &&
+      currentPhase !== 'substitution_stoppage' &&
+      currentPhase !== 'penalty_shootout'
+    ) {
+      for (const rt of this.entities) {
+        if (rt.entity.role === 'outfield' && !rt.entity.isBenched && !rt.entity.isSentOff) {
+          rt.entity.pos.x = clamp(rt.entity.pos.x, -config.halfWidth + 0.7, config.halfWidth - 0.7);
+          rt.entity.pos.z = clamp(rt.entity.pos.z, -config.halfLength + 0.8, config.halfLength - 0.8);
+        }
       }
     }
   }
@@ -1030,6 +1435,20 @@ export class MatchEngine implements IMatchEngine {
     canMove: boolean
   ): void {
     const p = rt.entity;
+
+    // During free-kick setup (before release), let human taker aim smoothly while everyone else holds formation
+    if (this.phase === 'free_kick_setup' && !this.freeKickDirector.isReleasing()) {
+      if (this.freeKickDirector.isTaker(p.id)) {
+        if (p.isHumanControlled) {
+          const aimYaw = Math.atan2(this.humanAimDir.x, this.humanAimDir.z);
+          p.rotY = lerpAngle(p.rotY, aimYaw, 1 - Math.exp(-14 * dt));
+        } else if (p.isRemoteHuman) {
+          p.rotY = lerpAngle(p.rotY, this.guestAimAngle, 1 - Math.exp(-14 * dt));
+        }
+      }
+      if (rt.animLockTimer <= 0) p.animState = 'idle';
+      return;
+    }
 
     // During penalty setup, keep non-shooter outfielders still
     if (this.phase === 'penalty_setup') {
@@ -1157,6 +1576,7 @@ export class MatchEngine implements IMatchEngine {
 
     // AI-controlled outfielder!
     const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
+    const speedProfile = getOutfieldSpeedProfile(rules.aiDifficulty);
     const decision = this.outfieldAI.evaluate({
       player: p,
       allPlayers: this.entities.map((e) => e.entity),
@@ -1166,15 +1586,18 @@ export class MatchEngine implements IMatchEngine {
       stance: this.tactics[team],
       config: this.stadium.config,
       rules,
+      difficulty: rules.aiDifficulty,
       humanRole: this.humanSlot.role,
       humanTeam: this.humanSlot.team,
+      callForPass: this.callForPass,
+      lastPasserId: this.lastPasserId,
       dt,
       elapsed: this.elapsed,
     });
 
     const moving = Math.hypot(decision.moveDir.x, decision.moveDir.z) > 0.05;
     const sprinting = decision.sprint && p.stamina > 8;
-    const speed = moving ? (sprinting ? 10.6 : 7.5) : 0;
+    const speed = moving ? (sprinting ? speedProfile.sprint : speedProfile.walk) : 0;
 
     p.pos.x += decision.moveDir.x * speed * dt;
     p.pos.z += decision.moveDir.z * speed * dt;
@@ -1187,9 +1610,9 @@ export class MatchEngine implements IMatchEngine {
     }
 
     if (moving && sprinting) {
-      p.stamina = Math.max(0, p.stamina - 14 * dt);
+      p.stamina = Math.max(0, p.stamina - speedProfile.staminaDrain * dt);
     } else {
-      p.stamina = Math.min(100, p.stamina + 11 * dt);
+      p.stamina = Math.min(100, p.stamina + speedProfile.staminaRegen * dt);
     }
 
     if (rt.animLockTimer <= 0) {
@@ -1200,7 +1623,31 @@ export class MatchEngine implements IMatchEngine {
     switch (decision.action.kind) {
       case 'kick': {
         const act = decision.action;
-        this.performKick(rt, act.dir, act.power, act.lift, act.isSuperShot);
+        if (act.isPass) {
+          this.lastPasserId = p.id;
+          this.lastPassReceiverNotifiedId = null;
+          if (
+            act.fulfilledCallForPass &&
+            this.callForPass.active &&
+            this.callForPass.callerTeam === team
+          ) {
+            this.callForPass = {
+              ...this.callForPass,
+              active: false,
+              remainingSec: 0,
+              cooldownSec: CALL_FOR_PASS_COOLDOWN_SEC,
+            };
+            this.setSpeech(rt, 'خد يا معلم! ⚽🔥', 1.7);
+          }
+        } else {
+          this.lastPasserId = null;
+          this.lastPassReceiverNotifiedId = null;
+        }
+        if (act.curlSpinY !== undefined && Math.abs(act.curlSpinY) > 0.01) {
+          this.performKickWithSpin(rt, act.dir, act.power, act.lift, act.curlSpinY, act.isSuperShot);
+        } else {
+          this.performKick(rt, act.dir, act.power, act.lift, act.isSuperShot);
+        }
         break;
       }
       case 'slideTackle':
@@ -1220,7 +1667,12 @@ export class MatchEngine implements IMatchEngine {
     }
   }
 
-  private stepGoalkeeperEntity(rt: EntityRuntime, dt: number, canMove: boolean): void {
+  private stepGoalkeeperEntity(
+    rt: EntityRuntime,
+    dt: number,
+    rules: AdminRules,
+    canMove: boolean
+  ): void {
     const gk = rt.entity;
     const config = this.stadium.config;
     const team: TeamId = gk.team === 'blue' ? 'blue' : 'red';
@@ -1231,11 +1683,25 @@ export class MatchEngine implements IMatchEngine {
     const maxZ = team === 'red' ? -config.halfLength + 7.5 : config.halfLength - 0.6;
     const maxX = config.goalWidth * 0.56;
 
-    // Active GK dive lunge
+    // Calibrated GK dive lunge (smoothly moves toward gkDiveTargetX and decelerates cleanly on arrival!)
     if (rt.animLockTimer > 0 && (rt.gkDiveState === 'left' || rt.gkDiveState === 'right')) {
-      const diveSpeed = 10.5;
-      gk.pos.x = clamp(gk.pos.x + rt.gkDiveDirVec.x * diveSpeed * dt, -maxX - 1.2, maxX + 1.2);
-      gk.pos.z = clamp(gk.pos.z + rt.gkDiveDirVec.z * diveSpeed * dt, minZ, maxZ);
+      const targetX =
+        rt.gkDiveTargetX !== null
+          ? rt.gkDiveTargetX
+          : clamp(gk.pos.x + rt.gkDiveDirVec.x * 2.4, -maxX - 0.6, maxX + 0.6);
+      const remX = targetX - gk.pos.x;
+      const absRemX = Math.abs(remX);
+      if (absRemX > 0.04) {
+        const arrivalScale = clamp(absRemX / 0.85, 0.22, 1.0);
+        const stepX = Math.sign(remX) * Math.min(absRemX, rt.gkDiveSpeed * arrivalScale * dt);
+        gk.pos.x = clamp(gk.pos.x + stepX, -maxX - 0.85, maxX + 0.85);
+        rt.vx = stepX / Math.max(dt, 0.001);
+      } else {
+        gk.pos.x = targetX;
+        rt.vx = 0;
+      }
+      gk.pos.z = clamp(gk.pos.z + rt.gkDiveDirVec.z * rt.gkDiveSpeed * 0.25 * dt, minZ, maxZ);
+      rt.vz = 0;
       return;
     }
 
@@ -1260,6 +1726,8 @@ export class MatchEngine implements IMatchEngine {
 
       gk.pos.x = clamp(gk.pos.x + dir.x * speed * dt, -maxX, maxX);
       gk.pos.z = clamp(gk.pos.z + dir.z * speed * dt, minZ, maxZ);
+      rt.vx = dir.x * speed;
+      rt.vz = dir.z * speed;
       gk.rotY = team === 'red' ? 0 : Math.PI;
 
       if (rt.animLockTimer <= 0) {
@@ -1270,6 +1738,7 @@ export class MatchEngine implements IMatchEngine {
     }
 
     // AI Goalkeeper
+    const gkProfile = getGoalkeeperProfile(rules.aiDifficulty);
     const teammates = this.entities
       .filter((e) => e.entity.team === team)
       .map((e) => e.entity);
@@ -1278,6 +1747,8 @@ export class MatchEngine implements IMatchEngine {
       gk,
       ballPos: this.ball.state.pos,
       ballVel: this.ball.state.vel,
+      ballSpin: this.ball.state.spin,
+      difficulty: rules.aiDifficulty,
       config,
       hasCaughtBall: this.gkCaughtById === gk.id,
       teammates,
@@ -1291,7 +1762,12 @@ export class MatchEngine implements IMatchEngine {
     }
 
     if (decision.diveDir !== 'none' && rt.gkDiveCooldown <= 0) {
-      this.performGKDive(rt, decision.diveDir);
+      this.performGKDive(rt, decision.diveDir, {
+        diveTargetX: decision.diveTargetX,
+        diveSpeed: decision.diveSpeed,
+        preferParry: decision.preferParry,
+        diveHeight: decision.diveHeight,
+      });
       return;
     }
 
@@ -1299,15 +1775,21 @@ export class MatchEngine implements IMatchEngine {
     const dz = decision.targetPos.z - gk.pos.z;
     const dist = Math.hypot(dx, dz);
     if (dist > 0.15) {
-      const speed = decision.sprint ? 7.8 : 5.4;
+      const speed = decision.sprint ? gkProfile.sprintSpeed : gkProfile.moveSpeed;
       const stepDist = Math.min(dist, speed * dt);
       gk.pos.x = clamp(gk.pos.x + (dx / dist) * stepDist, -maxX - 1.5, maxX + 1.5);
       gk.pos.z = clamp(gk.pos.z + (dz / dist) * stepDist, minZ - 1, maxZ + 1);
+      rt.vx = (dx / dist) * speed;
+      rt.vz = (dz / dist) * speed;
       if (rt.animLockTimer <= 0) {
         gk.animState = this.gkCaughtById === gk.id ? 'gk_catch' : 'run';
       }
-    } else if (rt.animLockTimer <= 0) {
-      gk.animState = this.gkCaughtById === gk.id ? 'gk_catch' : 'idle';
+    } else {
+      rt.vx = 0;
+      rt.vz = 0;
+      if (rt.animLockTimer <= 0) {
+        gk.animState = this.gkCaughtById === gk.id ? 'gk_catch' : 'idle';
+      }
     }
 
     gk.rotY = lerpAngle(gk.rotY, decision.facingYaw, 1 - Math.exp(-10 * dt));
@@ -1385,8 +1867,22 @@ export class MatchEngine implements IMatchEngine {
       case 'redCard':
         this.issueCardToPlayer(decision.action.targetId, 'red', decision.action.reason);
         break;
+      case 'freeKick':
+        this.handleRefereeFreeKickAward(
+          decision.action.forTeam,
+          decision.action.spot,
+          decision.action.reason,
+          decision.action.offenderId,
+          decision.action.card
+        );
+        break;
       case 'penalty':
-        this.startPenaltyKick(decision.action.forTeam, decision.action.reason);
+        this.handleRefereePenaltyAward(
+          decision.action.forTeam,
+          decision.action.reason,
+          decision.action.offenderId,
+          decision.action.card
+        );
         break;
       case 'startVAR':
         this.enterVARReview(
@@ -1426,6 +1922,9 @@ export class MatchEngine implements IMatchEngine {
       config: this.stadium.config,
       rules,
       isHumanCoach,
+      disciplineTracker: this.coachAI.getDisciplineTracker(),
+      hasPendingSub: this.pendingSub !== null,
+      matchElapsedSec: this.matchElapsedSec,
       dt,
       elapsed: this.elapsed,
     });
@@ -1456,10 +1955,15 @@ export class MatchEngine implements IMatchEngine {
         this.applyTeamTactic(team, decision.action.stance, false);
         break;
       case 'subToBench':
-        coach.animState = 'coach_shout';
-        rt.animLockTimer = 1.3;
-        this.setSpeech(rt, decision.action.shoutText, 3.2);
-        this.handleCoachSubToBench(decision.action.playerId, rules);
+        if (this.pendingSub === null) {
+          this.handleCoachSubToBench(decision.action.playerId, rules, {
+            inPlayerId: decision.action.inPlayerId,
+            reason: decision.action.reason,
+            trigger: decision.action.trigger,
+            shoutText: decision.action.shoutText,
+            coachRt: rt,
+          });
+        }
         break;
       case 'none':
         break;
@@ -1469,25 +1973,71 @@ export class MatchEngine implements IMatchEngine {
   private stepBenchedPlayer(rt: EntityRuntime, dt: number): void {
     const p = rt.entity;
     const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
-    const seat = this.stadium.getBenchSeatPosition(team, rt.benchSlotIndex);
+    p.stamina = Math.min(100, p.stamina + 18 * dt);
+
+    // If this reserve is queued for a football-law substitution, jog eagerly to the +X touchline!
+    if (this.pendingSub && this.pendingSub.inPlayerId === p.id) {
+      const waitX = this.stadium.config.halfWidth + 1.2;
+      const waitZ = team === 'red' ? -4.5 : 4.5;
+      const dx = waitX - p.pos.x;
+      const dz = waitZ - p.pos.z;
+      const dist = Math.hypot(dx, dz);
+      p.pos.y = 0;
+      if (dist > 0.14) {
+        const step = Math.min(dist, 6.2 * dt);
+        p.pos.x += (dx / dist) * step;
+        p.pos.z += (dz / dist) * step;
+        p.rotY = lerpAngle(p.rotY, Math.atan2(dx, dz), 1 - Math.exp(-12 * dt));
+        if (rt.animLockTimer <= 0) p.animState = 'run';
+      } else {
+        p.pos.x = waitX;
+        p.pos.z = waitZ;
+        p.rotY = -Math.PI / 2;
+        if (rt.animLockTimer <= 0) p.animState = 'sub_enter_pitch';
+      }
+      return;
+    }
+
+    const seat = this.stadium.getBenchSeatPosition(team, Math.max(0, rt.benchSlotIndex));
     p.pos.x = seat.x;
     p.pos.y = seat.y;
     p.pos.z = seat.z;
     p.rotY = -Math.PI / 2;
-    p.stamina = Math.min(100, p.stamina + 18 * dt);
     if (rt.animLockTimer <= 0) {
       p.animState = 'sitting_bench';
     }
   }
 
-  private stepSentOffPlayer(rt: EntityRuntime): void {
+  private stepSentOffPlayer(rt: EntityRuntime, dt = 0.016): void {
     const p = rt.entity;
-    // Stand gloomily behind the -X touchline tunnel
-    p.pos.x = -this.stadium.config.halfWidth - 5.5;
+    const tunnelX = -this.stadium.config.halfWidth - 5.5;
+    const tunnelZ = p.team === 'red' ? -18 : 18;
     p.pos.y = 0;
-    p.pos.z = p.team === 'red' ? -18 : 18;
-    p.rotY = Math.PI / 2;
-    p.animState = 'protest';
+
+    // If inside pitch (e.g. kickoff reset), park at tunnel; if already past -X line, walk gently to tunnel spot!
+    if (p.pos.x > -this.stadium.config.halfWidth - 1.2) {
+      p.pos.x = tunnelX;
+      p.pos.z = tunnelZ;
+      p.rotY = Math.PI / 2;
+      p.animState = 'protest';
+      return;
+    }
+
+    const dx = tunnelX - p.pos.x;
+    const dz = tunnelZ - p.pos.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 0.2) {
+      const step = Math.min(dist, 3.4 * dt);
+      p.pos.x += (dx / dist) * step;
+      p.pos.z += (dz / dist) * step;
+      p.rotY = lerpAngle(p.rotY, Math.atan2(dx, dz), 1 - Math.exp(-8 * dt));
+      p.animState = 'walk_of_shame';
+    } else {
+      p.pos.x = tunnelX;
+      p.pos.z = tunnelZ;
+      p.rotY = Math.PI / 2;
+      p.animState = 'protest';
+    }
   }
 
   private stepCelebrationEntity(rt: EntityRuntime, dt: number): void {
@@ -1531,7 +2081,7 @@ export class MatchEngine implements IMatchEngine {
     }
   }
 
-  private stepBallAndInteractions(dt: number): void {
+  private stepBallAndInteractions(dt: number, rules: AdminRules): void {
     const config = this.stadium.config;
 
     // 1. If a GK is holding a caught ball, keep ball glued in front of GK hands
@@ -1545,6 +2095,13 @@ export class MatchEngine implements IMatchEngine {
           z: gkRt.entity.pos.z + forwardZ * 0.65,
         });
         this.gkCatchHoldTimer += dt;
+
+        // Football-law stoppage trigger #2: GK caught the ball while a substitution is queued!
+        if (this.pendingSub && this.phase === 'playing' && this.gkCatchHoldTimer >= 0.22) {
+          this.beginSubstitutionStoppage('الحارس مسك الكورة — تبديل رسمي! 🧤🔄');
+          return;
+        }
+
         // Auto-release after 3.5s for human GK (Host or Guest) so play never stalls
         if (
           (gkRt.entity.isHumanControlled || gkRt.entity.isRemoteHuman) &&
@@ -1558,7 +2115,7 @@ export class MatchEngine implements IMatchEngine {
       }
     }
 
-    // 2. Sync solid player capsule colliders into Rapier3D, then step ball physics
+    // 2. Sync solid player capsule colliders into Rapier3D (disable GK rigid bounce so MatchEngine swept save logic owns GK saves!)
     if (this.ball.syncPlayerColliders) {
       this.ball.syncPlayerColliders(
         this.entities.map((rt) => ({
@@ -1571,14 +2128,77 @@ export class MatchEngine implements IMatchEngine {
             !rt.entity.isBenched &&
             !rt.entity.isSentOff,
           isKickerCooldown:
-            rt.kickCooldown > 0 || this.possessorId === rt.entity.id,
+            rt.kickCooldown > 0 ||
+            this.possessorId === rt.entity.id ||
+            rt.entity.role === 'goalkeeper',
         }))
       );
     }
 
+    const prevBallPos: Vec3 = { ...this.ball.state.pos };
+    const preTickVel: Vec3 = { ...this.ball.state.vel };
     const tick = this.ball.update(dt, config);
     const ballPos = this.ball.state.pos;
     const ballSpeed = tick.speed;
+    const incomingSpeed = Math.max(
+      ballSpeed,
+      Math.hypot(preTickVel.x, preTickVel.y, preTickVel.z)
+    );
+
+    // 3. Swept 3D Segment Goalkeeper Save Check BEFORE handleGoalScored (eliminates fast-shot tunneling!)
+    if (this.phase === 'playing' && this.gkSaveGraceTimer <= 0) {
+      const gkProfile = getGoalkeeperProfile(rules.aiDifficulty);
+      for (const rt of this.entities) {
+        const gk = rt.entity;
+        if (gk.role !== 'goalkeeper' || gk.isBenched || gk.isSentOff) continue;
+
+        const isDiving = rt.gkDiveState === 'left' || rt.gkDiveState === 'right';
+        const isHumanGK = gk.isHumanControlled || Boolean(gk.isRemoteHuman);
+        const saveCenter: Vec3 = {
+          x: gk.pos.x + (isDiving ? rt.gkDiveDirVec.x * 0.75 : 0),
+          y: isDiving ? 0.95 : 1.05,
+          z: gk.pos.z + (isDiving ? rt.gkDiveDirVec.z * 0.35 : 0),
+        };
+
+        const cpSave = closestPointOnSeg3D(prevBallPos, ballPos, saveCenter);
+        const cpBody = closestPointOnSeg3D(prevBallPos, ballPos, gk.pos);
+        const dSave = distXZ(cpSave, saveCenter);
+        const dBody = distXZ(cpBody, gk.pos);
+        const dXZ = Math.min(dSave, dBody);
+        const interceptPt = dSave <= dBody ? cpSave : cpBody;
+
+        const reachXZ = isDiving
+          ? isHumanGK
+            ? 3.25
+            : gkProfile.diveReachXZ
+          : isHumanGK
+            ? 2.0
+            : gkProfile.standReachXZ;
+        const reachY = isDiving
+          ? isHumanGK
+            ? 2.95
+            : gkProfile.diveReachY
+          : isHumanGK
+            ? 2.5
+            : gkProfile.standReachY;
+
+        if (dXZ <= reachXZ && interceptPt.y <= reachY) {
+          const team: TeamId = gk.team === 'blue' ? 'blue' : 'red';
+          const safeZ =
+            team === 'red'
+              ? Math.max(-config.halfLength + 0.55, interceptPt.z)
+              : Math.min(config.halfLength - 0.55, interceptPt.z);
+          // Place ball at intercept point in front of goal line (cancels any same-tick net crossing!)
+          this.ball.setPositionAndStop({
+            x: interceptPt.x,
+            y: Math.max(0.42, interceptPt.y),
+            z: safeZ,
+          });
+          this.handleGoalkeeperSave(rt, incomingSpeed, rules);
+          return;
+        }
+      }
+    }
 
     if (tick.hitPost) {
       this.sound.playPostClang();
@@ -1588,39 +2208,36 @@ export class MatchEngine implements IMatchEngine {
       this.pushEvent('في العارضة!! يا ساتر يا رب! 😱🥅', '🥅', 'crowd');
     }
 
-    if (tick.goalScored && this.phase === 'playing') {
+    const liveBallPhase =
+      this.phase === 'playing' ||
+      (this.phase === 'free_kick_setup' && this.freeKickDirector.isReleasing());
+
+    if (tick.goalScored && liveBallPhase) {
+      if (this.phase === 'free_kick_setup') {
+        this.freeKickDirector.reset();
+      }
       this.handleGoalScored(tick.goalScored);
       return;
     }
 
-    if (this.phase !== 'playing') {
+    if (!liveBallPhase) {
       this.possessorId = null;
       return;
     }
 
-    // 3. Check Goalkeeper saves & catches!
-    if (this.gkSaveGraceTimer <= 0) {
-      for (const rt of this.entities) {
-        const gk = rt.entity;
-        if (gk.role !== 'goalkeeper' || gk.isBenched || gk.isSentOff) continue;
-
-        const isDiving = rt.gkDiveState === 'left' || rt.gkDiveState === 'right';
-        const isHumanGK = gk.isHumanControlled || Boolean(gk.isRemoteHuman);
-        // Generous arcade save radius, especially rewarding for human FP GK!
-        const reachXZ = isDiving
-          ? isHumanGK
-            ? 3.1
-            : 2.35
-          : isHumanGK
-            ? 1.95
-            : 1.65;
-        const reachY = isDiving ? 2.65 : 2.35;
-
-        const d = distXZ(gk.pos, ballPos);
-        if (d <= reachXZ && ballPos.y <= reachY) {
-          this.handleGoalkeeperSave(rt, ballSpeed);
-          return;
-        }
+    // Football-law stoppage triggers #1 & #4: touchline out-of-bounds OR arcade anti-stall window!
+    if (this.pendingSub) {
+      if (tick.hitTouchline) {
+        this.beginSubstitutionStoppage('الكورة لمست الخط — تبديل رسمي! 🏁🔄');
+        return;
+      }
+      if (
+        (this.pendingSubWaitSec >= 5.5 &&
+          (ballSpeed < 9.0 || Math.abs(ballPos.x) > config.halfWidth - 4.0)) ||
+        this.pendingSubWaitSec >= 10.0
+      ) {
+        this.beginSubstitutionStoppage('توقف اللعب — تبديل رسمي! 🏁🔄');
+        return;
       }
     }
 
@@ -1665,6 +2282,30 @@ export class MatchEngine implements IMatchEngine {
       this.possessorId = closestCarrier.entity.id;
       const p = closestCarrier.entity;
       const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
+
+      // Track pass receipt for OutfieldAI hysteresis & clear fulfilled Call-for-Pass!
+      if (
+        this.lastPasserId &&
+        this.lastPasserId !== p.id &&
+        this.lastPassReceiverNotifiedId !== p.id
+      ) {
+        const passerRt = this.entities.find((e) => e.entity.id === this.lastPasserId);
+        if (passerRt && passerRt.entity.team === team) {
+          this.outfieldAI.recordPassReceived(p.id, this.lastPasserId, this.elapsed);
+          this.lastPassReceiverNotifiedId = p.id;
+          if (this.callForPass.active && this.callForPass.callerId === p.id) {
+            this.callForPass = {
+              ...this.callForPass,
+              active: false,
+              remainingSec: 0,
+              cooldownSec: CALL_FOR_PASS_COOLDOWN_SEC,
+            };
+          }
+        } else if (passerRt && passerRt.entity.team !== team) {
+          this.lastPasserId = null;
+          this.lastPassReceiverNotifiedId = null;
+        }
+      }
       const leadX = p.isHumanControlled
         ? this.humanAimDir.x
         : p.isRemoteHuman
@@ -1708,49 +2349,96 @@ export class MatchEngine implements IMatchEngine {
     }
   }
 
-  private handleGoalkeeperSave(gkRt: EntityRuntime, incomingSpeed: number): void {
+  private handleGoalkeeperSave(
+    gkRt: EntityRuntime,
+    incomingSpeed: number,
+    rules: AdminRules
+  ): void {
     const gk = gkRt.entity;
+    const config = this.stadium.config;
     const team: TeamId = gk.team === 'blue' ? 'blue' : 'red';
     const forwardZ = team === 'red' ? 1 : -1;
     const isDiving = gkRt.gkDiveState === 'left' || gkRt.gkDiveState === 'right';
+    const profile = getGoalkeeperProfile(rules.aiDifficulty);
+    const ballPos = this.ball.state.pos;
 
     gkRt.saves += 1;
     this.possessorId = null;
-    this.gkSaveGraceTimer = 0.55;
+    this.gkSaveGraceTimer = 0.58;
 
-    // Rematch visceral Hit-Stop + extra burst on diving GK saves!
-    if (isDiving) {
-      this.triggerHitStop(0.08);
-      this.effects.spawnBurst(this.ball.state.pos, 0x38bdf8, 26, 5.4);
-      this.cameraDirector.triggerShake(0.35, 0.24);
+    const shouldParry =
+      gkRt.gkPreferParry ||
+      this.ball.state.isSuperShot ||
+      incomingSpeed > profile.parryPowerThreshold ||
+      (isDiving && Math.abs(ballPos.x - gk.pos.x) > 1.35);
+
+    if (shouldParry) {
+      const parrySideX =
+        isDiving && Math.abs(gkRt.gkDiveDirVec.x) > 0.1
+          ? Math.sign(gkRt.gkDiveDirVec.x)
+          : Math.abs(ballPos.x - gk.pos.x) > 0.15
+            ? Math.sign(ballPos.x - gk.pos.x)
+            : Math.random() < 0.5
+              ? -1
+              : 1;
+
+      const rightSignX = team === 'red' ? -1 : 1;
+      const isRightSide = parrySideX * rightSignX >= 0;
+      if (gkRt.gkDiveState === 'left') {
+        gk.animState = 'gk_parry_left';
+      } else if (gkRt.gkDiveState === 'right') {
+        gk.animState = 'gk_parry_right';
+      } else {
+        gkRt.gkDiveState = isRightSide ? 'right' : 'left';
+        gkRt.gkDiveDirVec = { x: parrySideX, y: 0, z: 0 };
+        gkRt.gkDiveTargetX = clamp(
+          gk.pos.x + parrySideX * 1.15,
+          -config.goalWidth * 0.52,
+          config.goalWidth * 0.52
+        );
+        gk.animState = isRightSide ? 'gk_parry_right' : 'gk_parry_left';
+      }
+      gkRt.animLockTimer = 0.55;
+
+      const parryDir = normalizeXZ(parrySideX * 0.88, forwardZ * 0.58);
+      const parryPower = clamp(12.5 + incomingSpeed * 0.22, 13.5, 19.5);
+      this.ball.kick(parryDir, parryPower, 3.8, false, gk.id, team);
+
+      this.triggerHitStop(0.065);
+      this.effects.spawnBurst(ballPos, 0x00e5ff, 26, 5.5);
+      this.effects.spawnBurst(ballPos, 0xfbbf24, 16, 4.2);
+      this.cameraDirector.triggerShake(0.34, 0.24);
+      this.sound.playKick(0.82);
+      this.sound.playCrowdReaction('cheer');
+      this.crowdExcitement = Math.min(1, this.crowdExcitement + 0.55);
+      this.pushEvent(`تصدّي خرافي بأطراف الأصابع من ${gk.name}! 🧤🔥`, '🧤', 'crowd');
+      this.setSpeech(gkRt, 'بأطراف صوابعه!! تصدي أسطوري! 🧤🔥', 2.5);
+      return;
     }
 
-    if (incomingSpeed > 11 || isDiving) {
+    // Clean athletic catch -> glue ball to GK hands, hold briefly, then distribute upfield!
+    this.gkCaughtById = gk.id;
+    this.gkCatchHoldTimer = 0;
+    gkRt.gkDiveState = 'catch';
+    gkRt.gkDiveTargetX = null;
+    gkRt.gkPreferParry = false;
+    gk.animState = 'gk_catch';
+    gkRt.animLockTimer = 0.48;
+    this.ball.setPositionAndStop({
+      x: gk.pos.x + Math.sin(gk.rotY) * 0.65,
+      y: 1.15,
+      z: gk.pos.z + forwardZ * 0.65,
+    });
+    this.sound.playKick(0.45);
+
+    if (incomingSpeed > 10 || isDiving) {
+      this.triggerHitStop(0.055);
       this.sound.playCrowdReaction('cheer');
-      this.crowdExcitement = Math.min(1, this.crowdExcitement + 0.5);
-      this.effects.spawnBurst(this.ball.state.pos, 0x10b981, 22, 5);
-      this.cameraDirector.triggerShake(0.28, 0.22);
+      this.crowdExcitement = Math.min(1, this.crowdExcitement + 0.45);
+      this.effects.spawnBurst(this.ball.state.pos, 0x10b981, 20, 4.4);
+      this.cameraDirector.triggerShake(0.24, 0.2);
       this.pushEvent(`تصدّي خرافي من ${gk.name}! سد منيع 🧤🔥`, '🧤', 'crowd');
       this.setSpeech(gkRt, 'مفيش كورة هتعدّي! 🧤', 2.2);
-    }
-
-    // Super shots get parried wide; regular shots get cleanly caught!
-    if (this.ball.state.isSuperShot && incomingSpeed > 22) {
-      const parrySide = this.ball.state.pos.x >= gk.pos.x ? 1 : -1;
-      const parryDir = normalizeXZ(parrySide * 0.85, forwardZ * 0.65);
-      this.ball.kick(parryDir, 15, 0.3, false, gk.id, team);
-      this.sound.playKick(0.75);
-    } else {
-      this.gkCaughtById = gk.id;
-      this.gkCatchHoldTimer = 0;
-      gkRt.gkDiveState = 'catch';
-      gk.animState = 'gk_catch';
-      gkRt.animLockTimer = 0.45;
-      this.ball.setPositionAndStop({
-        x: gk.pos.x,
-        y: 1.15,
-        z: gk.pos.z + forwardZ * 0.65,
-      });
     }
   }
 
@@ -1844,8 +2532,54 @@ export class MatchEngine implements IMatchEngine {
     this.broadcastWorldSnapshot();
   }
 
+  private handleCallForPass(actor: HumanActor = 'host'): void {
+    if (
+      this.phase !== 'playing' &&
+      this.phase !== 'kickoff' &&
+      this.phase !== 'free_kick_setup'
+    ) {
+      return;
+    }
+    const rt = this.getActorRuntime(actor);
+    if (!rt || rt.entity.role !== 'outfield' || rt.entity.isBenched || rt.entity.isSentOff) {
+      return;
+    }
+    if (!this.callForPass.active && this.callForPass.cooldownSec > 0.05) {
+      return;
+    }
+    if (
+      this.callForPass.active &&
+      this.callForPass.callerId === rt.entity.id &&
+      this.callForPass.remainingSec > 2.2
+    ) {
+      return;
+    }
+
+    const team: TeamId = rt.entity.team === 'blue' ? 'blue' : 'red';
+    this.callForPass = {
+      active: true,
+      callerId: rt.entity.id,
+      callerName: rt.entity.name,
+      callerTeam: team,
+      actor,
+      remainingSec: 3.0,
+      cooldownSec: 0,
+    };
+    this.sound.playPassCall?.();
+    this.setSpeech(rt, 'باصيلي! 📣', 2.4);
+    this.effects.spawnBurst(rt.entity.pos, 0xfbbf24, 10, 2.2);
+    this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
   private handleHumanPassOrTackle(actor: HumanActor = 'host'): void {
-    if (this.phase !== 'playing' && this.phase !== 'penalty_setup') return;
+    if (
+      this.phase !== 'playing' &&
+      this.phase !== 'penalty_setup' &&
+      this.phase !== 'free_kick_setup'
+    ) {
+      return;
+    }
     const rt = this.getActorRuntime(actor);
     if (!rt || rt.entity.role !== 'outfield' || rt.entity.isBenched || rt.entity.isSentOff) return;
 
@@ -1855,6 +2589,20 @@ export class MatchEngine implements IMatchEngine {
     const slot = this.getActorSlot(actor);
     const otherHumanId = this.getOtherActorControlledId(actor);
     const dBall = distXZ(p.pos, this.ball.state.pos);
+
+    if (this.phase === 'free_kick_setup') {
+      if (this.freeKickDirector.isTaker(p.id)) {
+        const fkState = this.freeKickDirector.getState();
+        if (fkState.elapsedSec < 0.36) {
+          this.freeKickDirector.update(0.36 - fkState.elapsedSec);
+        }
+        const aim = normalizeXZ(aimRaw.x, aimRaw.z);
+        this.freeKickDirector.executePass(p.id, aim);
+      } else if (this.freeKickDirector.getState().awardedTeam === team) {
+        this.handleCallForPass(actor);
+      }
+      return;
+    }
 
     if (this.phase === 'penalty_setup' && this.penaltyCtx?.shooterId === p.id) {
       const dir = normalizeXZ(aimRaw.x, aimRaw.z);
@@ -1876,6 +2624,8 @@ export class MatchEngine implements IMatchEngine {
       const dist = bestTarget ? distXZ(p.pos, bestTarget.entity.pos) : 14;
       const power = clamp(14 + dist * 0.52, 16, 24);
 
+      this.lastPasserId = p.id;
+      this.lastPassReceiverNotifiedId = null;
       this.performKick(rt, passDir, power, 1.4, false);
 
       // PES auto-switch to pass receiver when team_switch is active (skipping the other human!)
@@ -1888,6 +2638,20 @@ export class MatchEngine implements IMatchEngine {
       ) {
         this.assignActorControlTo(actor, bestTarget.entity.id);
       }
+      return;
+    }
+
+    // If off-ball AND a teammate currently possesses/controls the ball (within 2.2m), call for pass instead of tackling air!
+    const teammateControlsBall = this.entities.some(
+      (e) =>
+        e.entity.id !== p.id &&
+        e.entity.team === team &&
+        !e.entity.isBenched &&
+        !e.entity.isSentOff &&
+        (this.possessorId === e.entity.id || distXZ(e.entity.pos, this.ball.state.pos) <= 2.2)
+    );
+    if (teammateControlsBall) {
+      this.handleCallForPass(actor);
       return;
     }
 
@@ -1908,7 +2672,13 @@ export class MatchEngine implements IMatchEngine {
   }
 
   private handleHumanLobPass(holdRatio = 0.5, actor: HumanActor = 'host'): void {
-    if (this.phase !== 'playing' && this.phase !== 'penalty_setup') return;
+    if (
+      this.phase !== 'playing' &&
+      this.phase !== 'penalty_setup' &&
+      this.phase !== 'free_kick_setup'
+    ) {
+      return;
+    }
     const rt = this.getActorRuntime(actor);
     if (!rt || rt.entity.role !== 'outfield' || rt.entity.isBenched || rt.entity.isSentOff) return;
 
@@ -1919,6 +2689,11 @@ export class MatchEngine implements IMatchEngine {
     const slot = this.getActorSlot(actor);
     const otherHumanId = this.getOtherActorControlledId(actor);
     const aim = normalizeXZ(aimRaw.x, aimRaw.z);
+
+    if (this.phase === 'free_kick_setup') {
+      this.handleHumanPassOrTackle(actor);
+      return;
+    }
 
     if (this.phase === 'penalty_setup' && this.penaltyCtx?.shooterId === p.id) {
       const power = 16 + r * 6;
@@ -1955,6 +2730,8 @@ export class MatchEngine implements IMatchEngine {
           ? lateralBias * 14
           : (lobDir.x >= 0 ? 1 : -1) * (4.5 + r * 4.5);
 
+      this.lastPasserId = p.id;
+      this.lastPassReceiverNotifiedId = null;
       this.performKickWithSpin(rt, lobDir, power, lift, curlSpinY, false);
       this.effects.spawnBurst(this.ball.state.pos, 0x38bdf8, 10, 2.4);
 
@@ -1970,7 +2747,7 @@ export class MatchEngine implements IMatchEngine {
       return;
     }
 
-    // Fallback to standing tackle if defending off the ball
+    // Fallback to standing tackle (or Call-for-Pass if teammate controls ball!)
     this.handleHumanPassOrTackle(actor);
   }
 
@@ -2036,17 +2813,37 @@ export class MatchEngine implements IMatchEngine {
   }
 
   private handleHumanShootRelease(actor: HumanActor = 'host'): void {
-    const rt = this.getActorRuntime(actor);
-    if (!rt || rt.entity.role !== 'outfield' || rt.entity.isBenched || rt.entity.isSentOff) return;
-    if (this.phase !== 'playing' && this.phase !== 'penalty_setup') return;
-
-    const p = rt.entity;
-    const dBall = distXZ(p.pos, this.ball.state.pos);
-    if (dBall > 2.95 && this.phase !== 'penalty_setup') return;
-
     const aimRaw = actor === 'host' ? this.humanAimDir : this.guestAimDir;
     const charge = actor === 'host' ? this.shotCharge : this.guestShotCharge;
     const curl = actor === 'host' ? this.aimCurl : this.guestAimCurl;
+
+    if (this.phase === 'penalty_shootout') {
+      this.penaltyShootoutDirector.executeHumanAimKick(aimRaw, Math.max(0.55, charge));
+      return;
+    }
+
+    const rt = this.getActorRuntime(actor);
+    if (!rt || rt.entity.role !== 'outfield' || rt.entity.isBenched || rt.entity.isSentOff) return;
+
+    const p = rt.entity;
+
+    if (this.phase === 'free_kick_setup') {
+      if (this.freeKickDirector.isTaker(p.id)) {
+        const fkState = this.freeKickDirector.getState();
+        if (fkState.elapsedSec < 0.36) {
+          this.freeKickDirector.update(0.36 - fkState.elapsedSec);
+        }
+        const dir = normalizeXZ(aimRaw.x, aimRaw.z);
+        this.freeKickDirector.executeShot(p.id, dir, Math.max(0.52, charge), curl);
+      }
+      return;
+    }
+
+    if (this.phase !== 'playing' && this.phase !== 'penalty_setup') return;
+
+    const dBall = distXZ(p.pos, this.ball.state.pos);
+    const isPenaltyTaker = this.phase === 'penalty_setup' && this.penaltyCtx?.shooterId === p.id;
+    if (dBall > 2.95 && !isPenaltyTaker) return;
 
     // Fire strictly along the 3D aiming arrow direction!
     const dir = normalizeXZ(aimRaw.x, aimRaw.z);
@@ -2060,6 +2857,8 @@ export class MatchEngine implements IMatchEngine {
     const curlSpinY = (isSweet ? 22 : 14) * curl;
     const isSuperShot = isSweet || charge >= 0.78;
 
+    this.lastPasserId = null;
+    this.lastPassReceiverNotifiedId = null;
     this.performKickWithSpin(rt, dir, power, liftVel, curlSpinY, isSuperShot);
 
     if (isSweet) {
@@ -2073,7 +2872,7 @@ export class MatchEngine implements IMatchEngine {
       this.pushEvent('شاطها في المدرجات! خفّ إيدك شوية 😂🚀', '🚀', 'crowd');
     }
 
-    if (this.phase === 'penalty_setup') {
+    if (isPenaltyTaker) {
       this.phase = 'playing';
       this.penaltyCtx = null;
       this.syncStoreImmediate();
@@ -2129,6 +2928,7 @@ export class MatchEngine implements IMatchEngine {
     if (this.gkCaughtById !== rt.entity.id) {
       // Allow quick punt if loose ball is right at GK's feet
       if (distXZ(rt.entity.pos, this.ball.state.pos) < 2.2) {
+        this.gkSaveGraceTimer = 0.45;
         const forwardZ = rt.entity.team === 'red' ? 1 : -1;
         this.performKick(rt, { x: 0, y: 0, z: forwardZ }, 24, 0.34, false);
       }
@@ -2260,6 +3060,11 @@ export class MatchEngine implements IMatchEngine {
       this.setSpeech(refRt, 'صفّارة! وقف اللعب! 🏁', 2.0);
     }
 
+    if (this.pendingSub && (this.phase === 'playing' || this.phase === 'paused_whistle')) {
+      this.beginSubstitutionStoppage('صفّارة الحكم — تبديل رسمي! 🏁🔄');
+      return;
+    }
+
     if (this.phase === 'playing') {
       this.sound.playWhistle('double');
       this.phase = 'paused_whistle';
@@ -2326,9 +3131,424 @@ export class MatchEngine implements IMatchEngine {
     );
   }
 
-  private handleCoachSubToBench(playerId: string, rules: AdminRules): void {
+  private handleRefFreeKick(forTeam?: TeamId, spot?: Vec3, reason?: string): void {
+    if (
+      this.phase !== 'playing' &&
+      this.phase !== 'paused_whistle' &&
+      this.phase !== 'kickoff' &&
+      this.phase !== 'free_kick_setup'
+    ) {
+      return;
+    }
+
+    this.updateNearestRefTarget();
+    let awardedTeam: TeamId;
+    if (forTeam) {
+      awardedTeam = forTeam;
+    } else if (this.pendingIncident) {
+      awardedTeam = this.pendingIncident.penaltyForTeam;
+    } else if (this.humanSlot.role === 'referee' && this.nearestRefTargetId) {
+      const nearest = this.entities.find((e) => e.entity.id === this.nearestRefTargetId);
+      awardedTeam = nearest?.entity.team === 'red' ? 'blue' : 'red';
+    } else if (this.humanSlot.role === 'outfield' || this.humanSlot.role === 'coach') {
+      awardedTeam = this.humanSlot.team;
+    } else {
+      awardedTeam = this.ball.state.pos.z >= 0 ? 'red' : 'blue';
+    }
+
+    const fkSpot: Vec3 = spot
+      ? { ...spot }
+      : this.pendingIncident
+        ? { ...this.pendingIncident.pos }
+        : { ...this.ball.state.pos };
+
+    this.pendingIncident = null;
+    this.startFreeKick(
+      awardedTeam,
+      fkSpot,
+      reason ?? 'صفّارة الحكم! ضربة حرة ثابتة 📣⚽',
+      'none'
+    );
+  }
+
+  private handleRefereeFreeKickAward(
+    forTeam: TeamId,
+    spot: Vec3,
+    reason: string,
+    offenderId?: string,
+    card: RefereeCardLevel = 'none'
+  ): void {
+    const offenderRt = offenderId
+      ? this.entities.find((e) => e.entity.id === offenderId)
+      : undefined;
+
+    if (card === 'red' && offenderRt && !offenderRt.entity.isSentOff) {
+      this.postRedCardResume = { kind: 'freeKick', forTeam, spot: { ...spot }, reason };
+      this.sendOffPlayer(offenderRt, `${offenderRt.entity.name}: ${reason}`);
+      return;
+    }
+
+    let shownCard: RefereeCardLevel = 'none';
+    if (card === 'yellow' && offenderRt && !offenderRt.entity.isSentOff) {
+      offenderRt.entity.yellowCards += 1;
+      this.sound.playCard('yellow');
+      if (offenderRt.entity.yellowCards >= 2) {
+        this.postRedCardResume = { kind: 'freeKick', forTeam, spot: { ...spot }, reason };
+        this.sendOffPlayer(
+          offenderRt,
+          `إنذار تاني وطرد لـ ${offenderRt.entity.name}! وضربة حرة! 🟨🟥`
+        );
+        return;
+      }
+      shownCard = 'yellow';
+      const refRt = this.entities.find((e) => e.entity.role === 'referee');
+      if (refRt) {
+        refRt.entity.animState = 'ref_yellow_card';
+        refRt.animLockTimer = 1.0;
+      }
+      this.setSpeech(offenderRt, 'ليه أصفر يا كابتن?! والله ما لمسته! 🟨😤', 2.4);
+      this.pushEvent(`${offenderRt.entity.name}: ${reason}`, '🟨', 'card_yellow');
+    }
+
+    this.startFreeKick(forTeam, spot, reason, shownCard);
+  }
+
+  private handleRefereePenaltyAward(
+    forTeam: TeamId,
+    reason: string,
+    offenderId?: string,
+    card: RefereeCardLevel = 'none'
+  ): void {
+    const offenderRt = offenderId
+      ? this.entities.find((e) => e.entity.id === offenderId)
+      : undefined;
+
+    if (card === 'red' && offenderRt && !offenderRt.entity.isSentOff) {
+      this.postRedCardResume = { kind: 'penalty', forTeam, reason };
+      this.sendOffPlayer(offenderRt, `${offenderRt.entity.name}: ${reason}`);
+      return;
+    }
+
+    if (card === 'yellow' && offenderRt && !offenderRt.entity.isSentOff) {
+      offenderRt.entity.yellowCards += 1;
+      this.sound.playCard('yellow');
+      if (offenderRt.entity.yellowCards >= 2) {
+        this.postRedCardResume = { kind: 'penalty', forTeam, reason };
+        this.sendOffPlayer(
+          offenderRt,
+          `إنذار تاني وطرد لـ ${offenderRt.entity.name}! وضربة جزاء! 🟨🟥`
+        );
+        return;
+      }
+      this.setSpeech(offenderRt, 'حرام عليك يا حكم ده الكورة!! 🟨😱', 2.4);
+      this.pushEvent(`${offenderRt.entity.name}: ${reason}`, '🟨', 'card_yellow');
+    }
+
+    this.startPenaltyKick(forTeam, reason);
+  }
+
+  private startFreeKick(
+    awardedTeam: TeamId,
+    spot: Vec3,
+    reason: string,
+    cardShown: RefereeCardLevel = 'none'
+  ): void {
+    this.isChargingShot = false;
+    this.shotCharge = 0;
+    this.aimCurl = 0;
+    this.guestIsChargingShot = false;
+    this.guestShotCharge = 0;
+    this.penaltyCtx = null;
+
+    const fkState = this.freeKickDirector.start({
+      awardedTeam,
+      spot,
+      reason,
+      cardShown,
+    });
+
+    // Align human taker free-look camera & 3D aiming arrow straight toward opponent goal
+    if (fkState.takerId) {
+      const takerRt = this.entities.find((e) => e.entity.id === fkState.takerId);
+      if (takerRt && takerRt.entity.isHumanControlled) {
+        this.inputManager.setFreeYaw(takerRt.entity.rotY, 0.12);
+        this.humanAimDir = {
+          x: Math.sin(takerRt.entity.rotY),
+          y: 0,
+          z: Math.cos(takerRt.entity.rotY),
+        };
+      }
+    }
+
+    this.crowdExcitement = Math.max(this.crowdExcitement, fkState.isDirectRange ? 0.88 : 0.62);
+    this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
+  private startPenaltyShootoutMode(fromDraw = false): void {
+    if (!this.running && !this.disposed) {
+      this.start();
+    }
+
+    const store = useGameStore.getState();
+    const rules = store.rules;
+
+    this.isPaused = false;
+    this.varCtx = null;
+    this.penaltyCtx = null;
+    this.pendingIncident = null;
+    this.pendingSub = null;
+    this.pendingSubWaitSec = 0;
+    this.postRedCardResume = null;
+    this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+    this.dramaCtx = null;
+    this.possessorId = null;
+    this.gkCaughtById = null;
+    this.isChargingShot = false;
+    this.shotCharge = 0;
+    this.aimCurl = 0;
+    this.guestIsChargingShot = false;
+    this.guestShotCharge = 0;
+    this.hitStopRemaining = 0;
+    this.goalReplayState = { ...INITIAL_GOAL_REPLAY_STATE };
+    this.replayDisplayPlayers = null;
+    this.callForPass = { ...INITIAL_CALL_FOR_PASS_STATE };
+    this.lastPasserId = null;
+    this.lastPassReceiverNotifiedId = null;
+    this.freeKickDirector.reset();
+    this.replayRecorder.unfreeze();
+    this.replayRecorder.clear();
+    this.stadium.setVARActive(false);
+    this.ball.setFrozen(false);
+    this.ball.setTrajectoryVisible(false);
+    this.hideAimingGuide();
+    this.inputManager.exitPointerLock();
+
+    if (!fromDraw || this.entities.length === 0) {
+      this.score = { red: 0, blue: 0 };
+      this.clockSec = 0;
+      store.resetMatchStats();
+      this.spawnRoster(rules);
+    } else {
+      // Preserve regulation draw score, restore fresh legs & ensure both GKs are on pitch
+      for (const rt of this.entities) {
+        rt.vx = 0;
+        rt.vz = 0;
+        rt.slideTimer = 0;
+        rt.knockbackTimer = 0;
+        rt.gkDiveState = 'none';
+        rt.gkDiveTargetX = null;
+        rt.entity.stamina = 100;
+        if (rt.entity.role === 'goalkeeper') {
+          rt.entity.isSentOff = false;
+          rt.entity.isBenched = false;
+        }
+      }
+    }
+
+    const normalizedSlot = this.normalizeSlotAgainstRules(store.humanSlot, rules);
+    this.humanSlot = normalizedSlot;
+    this.activeCamera =
+      normalizedSlot.cameraMode === 'gk_first_person' ? 'gk_first_person' : 'player_third';
+
+    this.assignInitialHumanEntity();
+
+    const humanTeam: TeamId = normalizedSlot.team === 'blue' ? 'blue' : 'red';
+    const isSpectator = normalizedSlot.role === 'spectator';
+
+    this.crowdExcitement = 0.92;
+    this.penaltyShootoutDirector.start({
+      humanTeam,
+      isSpectator,
+      fromDraw,
+    });
+    this.cameraDirector.snapNextFrame();
+    this.updateStadiumJumbotron();
+    this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
+  private stepPenaltyShootout(dt: number, cameraDt = dt): void {
+    const config = this.stadium.config;
+
+    // 1. Update human aim & shot charge
+    this.updateHumanAimAndCurl(dt);
+    if (this.isChargingShot) {
+      this.shotCharge = Math.min(1, this.shotCharge + dt * 1.05);
+    }
+
+    // 2. Tick entity animation locks & GK dive movement at +Z goal
+    const preState = this.penaltyShootoutDirector.getState();
+    for (const rt of this.entities) {
+      rt.animLockTimer = Math.max(0, rt.animLockTimer - dt);
+      rt.kickCooldown = Math.max(0, rt.kickCooldown - dt);
+      rt.gkDiveCooldown = Math.max(0, rt.gkDiveCooldown - dt);
+
+      if (rt.entity.role === 'goalkeeper' && rt.entity.id === preState.gkId) {
+        if (rt.animLockTimer > 0 && (rt.gkDiveState === 'left' || rt.gkDiveState === 'right')) {
+          const maxX = config.goalWidth * 0.54;
+          const targetX =
+            rt.gkDiveTargetX !== null
+              ? rt.gkDiveTargetX
+              : clamp(rt.entity.pos.x + rt.gkDiveDirVec.x * 2.5, -maxX, maxX);
+          const remX = targetX - rt.entity.pos.x;
+          const absRemX = Math.abs(remX);
+          if (absRemX > 0.04) {
+            const arrivalScale = clamp(absRemX / 0.85, 0.25, 1.0);
+            const stepX =
+              Math.sign(remX) * Math.min(absRemX, rt.gkDiveSpeed * arrivalScale * dt);
+            rt.entity.pos.x = clamp(rt.entity.pos.x + stepX, -maxX - 0.5, maxX + 0.5);
+          } else {
+            rt.entity.pos.x = targetX;
+          }
+          rt.entity.pos.z = clamp(rt.entity.pos.z, config.halfLength - 3.2, config.halfLength - 0.5);
+        } else if (rt.animLockTimer <= 0 && rt.gkDiveState !== 'none' && rt.gkDiveState !== 'catch') {
+          rt.gkDiveState = 'none';
+          rt.gkDiveTargetX = null;
+        }
+      }
+    }
+
+    // Subtle human shooter body orientation while aiming in awaiting_kick
+    if (preState.stage === 'awaiting_kick' && preState.humanTurnRole === 'kicker' && preState.shooterId) {
+      const shooterRt = this.entities.find((e) => e.entity.id === preState.shooterId);
+      if (shooterRt) {
+        const aimYaw = clamp(
+          Math.atan2(this.humanAimDir.x, Math.max(0.25, Math.abs(this.humanAimDir.z))),
+          -0.42,
+          0.42
+        );
+        shooterRt.entity.rotY = lerpAngle(shooterRt.entity.rotY, aimYaw, 1 - Math.exp(-12 * dt));
+      }
+    }
+
+    // 3. Advance 3D ball physics during live flight & turn_result, routing saves/goals to PenaltyShootoutDirector!
+    if (preState.stage === 'ball_in_flight' || preState.stage === 'turn_result') {
+      if (this.ball.syncPlayerColliders) {
+        this.ball.syncPlayerColliders(
+          this.entities.map((rt) => ({
+            id: rt.entity.id,
+            pos: rt.entity.pos,
+            vx: rt.vx,
+            vz: rt.vz,
+            active:
+              (rt.entity.role === 'outfield' || rt.entity.role === 'goalkeeper') &&
+              !rt.entity.isBenched &&
+              !rt.entity.isSentOff,
+            isKickerCooldown:
+              rt.kickCooldown > 0 ||
+              rt.entity.id === preState.shooterId ||
+              rt.entity.role === 'goalkeeper',
+          }))
+        );
+      }
+
+      const prevBallPos: Vec3 = { ...this.ball.state.pos };
+      const tick = this.ball.update(dt, config);
+      const ballPos = this.ball.state.pos;
+
+      if (tick.hitPost && preState.stage === 'ball_in_flight') {
+        this.sound.playPostClang();
+        this.sound.playCrowdReaction('ooh');
+        this.cameraDirector.triggerShake(0.32, 0.25);
+        this.effects.spawnBurst(ballPos, 0xfbbf24, 18, 4.5);
+      }
+
+      if (preState.stage === 'ball_in_flight') {
+        // Swept 3D segment save check for shootout GK before goal-line check!
+        const gkRt = preState.gkId
+          ? this.entities.find((e) => e.entity.id === preState.gkId)
+          : undefined;
+        let savedThisTick = false;
+
+        if (gkRt && ballPos.z >= config.halfLength - 3.2) {
+          const isDiving = gkRt.gkDiveState === 'left' || gkRt.gkDiveState === 'right';
+          const saveCenter: Vec3 = {
+            x: gkRt.entity.pos.x + (isDiving ? gkRt.gkDiveDirVec.x * 0.55 : 0),
+            y: isDiving ? 0.95 : 1.05,
+            z: gkRt.entity.pos.z,
+          };
+          const cp = closestPointOnSeg3D(prevBallPos, ballPos, saveCenter);
+          const dXZ = distXZ(cp, saveCenter);
+          const reachXZ = isDiving ? 1.65 : 1.1;
+          const reachY = config.goalHeight * 0.92;
+
+          if (dXZ <= reachXZ && cp.y <= reachY) {
+            savedThisTick = true;
+            gkRt.saves += 1;
+            const deflectDir = normalizeXZ((ballPos.x >= 0 ? 1 : -1) * 0.78, -1);
+            this.ball.setPositionAndStop({
+              x: cp.x,
+              y: Math.max(0.4, cp.y),
+              z: Math.min(config.halfLength - 0.55, cp.z),
+            });
+            this.ball.kick(deflectDir, 11.5, 3.2, false, gkRt.entity.id, preState.defendingTeam);
+            this.sound.playKick(0.76);
+            this.triggerHitStop(0.06);
+            this.effects.spawnBurst(this.ball.state.pos, 0x00e5ff, 24, 5.0);
+            this.cameraDirector.triggerShake(0.32, 0.24);
+            this.penaltyShootoutDirector.notifyBallSaved();
+          }
+        }
+
+        if (!savedThisTick && tick.goalScored) {
+          this.stadium.triggerGoalNetRipple(preState.defendingTeam, ballPos);
+          this.penaltyShootoutDirector.notifyGoalScored();
+        }
+      }
+    }
+
+    // 4. Tick PenaltyShootoutDirector state machine
+    this.penaltyShootoutDirector.update(dt);
+
+    // 5. Render characters, particles, camera & sync HUD
+    this.ball.setTrajectoryVisible(false);
+    this.hideAimingGuide();
+    this.characters.syncPlayers(
+      this.entities.map((e) => e.entity),
+      dt,
+      this.elapsed
+    );
+    this.effects.update(dt, this.ball.state.pos, this.ball.state.isSuperShot);
+    this.updateCameraAndVisuals(cameraDt);
+
+    this.hudSyncAccum += cameraDt;
+    if (this.hudSyncAccum >= 0.05) {
+      this.hudSyncAccum = 0;
+      this.syncStoreImmediate();
+    }
+  }
+
+  private handleCoachSubToBench(
+    playerId: string,
+    rules: AdminRules,
+    aiMeta?: {
+      inPlayerId: string;
+      reason: string;
+      trigger: CoachSubTrigger;
+      shoutText: string;
+      coachRt?: EntityRuntime;
+    }
+  ): void {
     if (!rules.enableCoachBench) {
-      this.pushEvent('تبديلات الدكة مقفولة بقرار الأدمن 🪑🚫', '🪑', 'bench');
+      if (!aiMeta) {
+        this.pushEvent('تبديلات الدكة مقفولة بقرار الأدمن 🪑🚫', '🪑', 'bench');
+      }
+      return;
+    }
+    if (
+      this.phase === 'substitution_stoppage' ||
+      this.phase === 'red_card_drama' ||
+      this.phase === 'penalty_shootout'
+    ) {
+      return;
+    }
+
+    // Extra Bug (a) Fix: NEVER allow an AI or second sub request to overwrite an existing pendingSub!
+    if (this.pendingSub !== null) {
+      if (!aiMeta) {
+        this.pushEvent('التبديل متسجل بالفعل ومستني أول توقف للعب! 🪧', '🪧', 'bench');
+      }
       return;
     }
 
@@ -2343,66 +3563,78 @@ export class MatchEngine implements IMatchEngine {
     }
 
     const team: TeamId = targetRt.entity.team === 'blue' ? 'blue' : 'red';
-    const reserveRt = this.entities.find(
-      (e) =>
-        e.entity.team === team &&
-        e.entity.role === 'outfield' &&
-        e.entity.isBenched &&
-        !e.entity.isSentOff
-    );
-    if (!reserveRt) {
-      this.pushEvent('مفيش بدلاء جاهزين على الدكة حالياً! 🪑', '🪑', 'bench');
+    const tracker = this.coachAI.getDisciplineTracker();
+
+    // Enforce strict football substitution caps & cooldowns for BOTH AI and human coaches!
+    const eligibility = tracker.canMakeSub(team, this.matchElapsedSec, {
+      isEmergencyFatigue: targetRt.entity.stamina < 18 || aiMeta?.trigger === 'emergency_fatigue',
+      bypassMinElapsed: !aiMeta,
+    });
+    if (!eligibility.allowed) {
+      if (!aiMeta && eligibility.blockReason) {
+        this.pushEvent(`🚫 لا يمكن التبديل: ${eligibility.blockReason}`, '🚫', 'bench');
+      }
       return;
     }
 
-    const oldPos = { ...targetRt.entity.pos };
-    const seatIdx = reserveRt.benchSlotIndex >= 0 ? reserveRt.benchSlotIndex : 0;
+    const reserveRt = aiMeta?.inPlayerId
+      ? this.entities.find(
+          (e) =>
+            e.entity.id === aiMeta.inPlayerId &&
+            e.entity.team === team &&
+            e.entity.role === 'outfield' &&
+            e.entity.isBenched &&
+            !e.entity.isSentOff
+        )
+      : this.entities.find(
+          (e) =>
+            e.entity.team === team &&
+            e.entity.role === 'outfield' &&
+            e.entity.isBenched &&
+            !e.entity.isSentOff &&
+            !tracker.wasSubbedOut(team, e.entity.id)
+        ) ??
+        this.entities.find(
+          (e) =>
+            e.entity.team === team &&
+            e.entity.role === 'outfield' &&
+            e.entity.isBenched &&
+            !e.entity.isSentOff
+        );
 
-    // Move target physically onto 3D dugout bench
-    targetRt.entity.isBenched = true;
-    targetRt.benchSlotIndex = seatIdx;
-    const seatPos = this.stadium.getBenchSeatPosition(team, seatIdx);
-    targetRt.entity.pos = { ...seatPos };
-    targetRt.entity.rotY = -Math.PI / 2;
-    targetRt.entity.animState = 'sitting_bench';
-
-    // Bring reserve onto pitch
-    reserveRt.entity.isBenched = false;
-    reserveRt.benchSlotIndex = -1;
-    reserveRt.entity.pos = { ...oldPos };
-    reserveRt.entity.stamina = 100;
-    reserveRt.entity.animState = 'run';
-
-    if (this.possessorId === targetRt.entity.id) {
-      this.possessorId = null;
+    if (!reserveRt) {
+      if (!aiMeta) {
+        this.pushEvent('مفيش بدلاء جاهزين على الدكة حالياً! 🪑', '🪑', 'bench');
+      }
+      return;
     }
 
-    // If the benched player was Host-controlled -> switch into 3D Bench Cam!
-    if (targetRt.entity.isHumanControlled) {
-      this.humanSlot.isBenched = true;
-      this.activeCamera = 'bench_cam';
-      this.humanSlot.cameraMode = 'bench_cam';
-      this.inputManager.exitPointerLock();
-      this.cameraDirector.snapNextFrame();
-    }
-
-    // If the benched player was Guest-controlled -> update Guest slot to Bench Cam!
-    if (targetRt.entity.isRemoteHuman) {
-      this.guestSlot.isBenched = true;
-      this.guestSlot.cameraMode = 'bench_cam';
-      useGameStore.getState().setGuestSlot(this.guestSlot);
-      this.broadcastLobbySync();
-    }
-
-    this.sound.playBenchBuzzer();
-    this.setSpeech(targetRt, 'ليه كده يا كوتش?! أنا لسه قادر! 🪑🤬', 3.0);
-    this.setSpeech(reserveRt, 'يلا بينا نقلب الماتش! 🔥', 2.4);
-    this.pushEvent(
-      `تبديل ناري! ${targetRt.entity.name} طلع دكة ونزل ${reserveRt.entity.name}! 🪑🔥`,
-      '🪑',
-      'bench'
+    tracker.recordSub(
+      team,
+      targetRt.entity.id,
+      reserveRt.entity.id,
+      this.matchElapsedSec,
+      aiMeta?.trigger ?? 'human_coach'
     );
-    this.syncStoreImmediate();
+
+    if (aiMeta?.coachRt) {
+      aiMeta.coachRt.entity.animState = 'coach_shout';
+      aiMeta.coachRt.animLockTimer = 1.3;
+      this.setSpeech(aiMeta.coachRt, aiMeta.shoutText, 3.2);
+    }
+
+    const reasonText = aiMeta?.reason ?? 'قرار فني من المدرب';
+    const nextSub: PendingSubstitution = {
+      team,
+      outPlayerId: targetRt.entity.id,
+      outPlayerName: targetRt.entity.name,
+      outPlayerNumber: targetRt.entity.number,
+      inPlayerId: reserveRt.entity.id,
+      inPlayerName: reserveRt.entity.name,
+      inPlayerNumber: reserveRt.entity.number,
+      requestedByHumanBench: false,
+    };
+    this.queueOrStartSubstitution(nextSub, targetRt, reserveRt, reasonText);
   }
 
   private handleBenchEmote(kind: 'rage' | 'water' | 'shout', actor: HumanActor = 'host'): void {
@@ -2432,8 +3664,20 @@ export class MatchEngine implements IMatchEngine {
   private handleBenchRequestReturn(actor: HumanActor = 'host'): void {
     const slot = this.getActorSlot(actor);
     if (!slot.isBenched) return;
+    if (this.phase === 'substitution_stoppage' || this.phase === 'red_card_drama') return;
+
     const benchedHuman = this.getActorRuntime(actor);
-    if (!benchedHuman) return;
+    if (!benchedHuman || benchedHuman.entity.isSentOff) return;
+    if (this.pendingSub !== null) {
+      this.pushEvent(
+        this.pendingSub.inPlayerId === benchedHuman.entity.id
+          ? 'انت واقف عالخط مستني أول توقف للعب! 🪧🔥'
+          : 'فيه تبديل تاني واقف عالخط حالياً — استنى لحظة! 🪧',
+        '🪧',
+        'bench'
+      );
+      return;
+    }
 
     const otherHumanId = this.getOtherActorControlledId(actor);
     const team: TeamId = slot.team;
@@ -2447,22 +3691,34 @@ export class MatchEngine implements IMatchEngine {
         e.entity.id !== otherHumanId
     );
 
-    const seatIdx = benchedHuman.benchSlotIndex >= 0 ? benchedHuman.benchSlotIndex : 0;
-    const returnPos: Vec3 = swapOut
-      ? { ...swapOut.entity.pos }
-      : { x: 16, y: 0, z: team === 'red' ? -6 : 6 };
-
-    if (swapOut) {
-      swapOut.entity.isBenched = true;
-      swapOut.benchSlotIndex = seatIdx;
-      swapOut.entity.pos = { ...this.stadium.getBenchSeatPosition(team, seatIdx) };
-      swapOut.entity.rotY = -Math.PI / 2;
-      swapOut.entity.animState = 'sitting_bench';
+    // If a pitch teammate exists during live match, queue authentic football-law substitution!
+    if (
+      swapOut &&
+      (this.phase === 'playing' ||
+        this.phase === 'paused_whistle' ||
+        this.phase === 'kickoff' ||
+        this.phase === 'penalty_setup' ||
+        this.phase === 'goal_celebration')
+    ) {
+      const nextSub: PendingSubstitution = {
+        team,
+        outPlayerId: swapOut.entity.id,
+        outPlayerName: swapOut.entity.name,
+        outPlayerNumber: swapOut.entity.number,
+        inPlayerId: benchedHuman.entity.id,
+        inPlayerName: benchedHuman.entity.name,
+        inPlayerNumber: benchedHuman.entity.number,
+        requestedByHumanBench: true,
+        actor,
+      };
+      this.queueOrStartSubstitution(nextSub, swapOut, benchedHuman);
+      return;
     }
 
+    // Fallback when 0 active outfield teammates remain (e.g. multiple red cards)
     benchedHuman.entity.isBenched = false;
     benchedHuman.benchSlotIndex = -1;
-    benchedHuman.entity.pos = returnPos;
+    benchedHuman.entity.pos = { x: 16, y: 0, z: team === 'red' ? -6 : 6 };
     benchedHuman.entity.stamina = 100;
     benchedHuman.entity.animState = 'run';
 
@@ -2761,9 +4017,23 @@ export class MatchEngine implements IMatchEngine {
   private checkSlideTackleImpact(tackler: EntityRuntime): void {
     const tp = tackler.entity;
     const team: TeamId = tp.team === 'blue' ? 'blue' : 'red';
+    const dBall = distXZ(tp.pos, this.ball.state.pos);
 
-    // Cleanly poke ball if reached
-    if (distXZ(tp.pos, this.ball.state.pos) < 1.35) {
+    // Check if tackler barrels through the active opponent carrier's legs BEFORE reaching the ball!
+    const carrierHitFirst = this.entities.some(
+      (other) =>
+        other.entity.id === this.possessorId &&
+        other.entity.team !== tp.team &&
+        other.entity.role === 'outfield' &&
+        !other.entity.isBenched &&
+        !other.entity.isSentOff &&
+        other.jukeImmuneTimer <= 0 &&
+        distXZ(tp.pos, other.entity.pos) < 1.28 &&
+        distXZ(tp.pos, other.entity.pos) + 0.16 < dBall
+    );
+
+    // Cleanly poke ball if reached cleanly before carrier body
+    if (!carrierHitFirst && dBall < 1.35) {
       this.possessorId = null;
       this.ball.kick(tackler.slideDirVec, 14, 0.08, false, tp.id, team);
       this.sound.playKick(0.5);
@@ -2811,7 +4081,7 @@ export class MatchEngine implements IMatchEngine {
           pos: { ...op.pos },
           inPenaltyBox: inBox,
           penaltyForTeam: victimTeam,
-          severity: 0.45 + Math.random() * 0.5,
+          severity: 0.3 + Math.random() * 0.56,
         };
         this.setSpeech(other, 'يا حكم!! كسرني! 🤕', 2.0);
         return;
@@ -2857,26 +4127,52 @@ export class MatchEngine implements IMatchEngine {
     this.sound.playCrowdReaction('boo');
   }
 
-  private performGKDive(rt: EntityRuntime, dir: 'left' | 'right' | 'center'): void {
+  private performGKDive(
+    rt: EntityRuntime,
+    dir: 'left' | 'right' | 'center',
+    opts?: {
+      diveTargetX?: number;
+      diveSpeed?: number;
+      preferParry?: boolean;
+      diveHeight?: GKDiveHeight;
+    }
+  ): void {
     const gk = rt.entity;
+    const config = this.stadium.config;
     const team: TeamId = gk.team === 'blue' ? 'blue' : 'red';
-    // Red GK faces +Z -> right is -X, left is +X; Blue GK faces -Z -> right is +X, left is -X
-    const rightSignX = team === 'red' ? -1 : 1;
+    // Facing +Z (cos > 0) -> right is -X; facing -Z (cos < 0, e.g. Blue GK or Penalty Shootout GK at +Z) -> right is +X
+    const facesNegativeZ = this.phase === 'penalty_shootout' ? true : Math.cos(gk.rotY) < 0 || team === 'blue';
+    const rightSignX = facesNegativeZ ? 1 : -1;
+    const maxDiveX = config.goalWidth * 0.52;
 
-    rt.gkDiveCooldown = 1.05;
-    rt.animLockTimer = 0.52;
+    rt.gkDiveCooldown = 1.0;
+    rt.animLockTimer = 0.68;
+    rt.gkDiveSpeed = opts?.diveSpeed ?? 9.5;
+    rt.gkPreferParry = Boolean(opts?.preferParry);
+    rt.gkDiveHeight = opts?.diveHeight ?? 'mid';
 
     if (dir === 'left') {
+      const lateralSign = -rightSignX;
       rt.gkDiveState = 'left';
-      rt.gkDiveDirVec = { x: -rightSignX, y: 0, z: 0 };
-      gk.animState = 'gk_dive_left';
+      rt.gkDiveDirVec = { x: lateralSign, y: 0, z: 0 };
+      rt.gkDiveTargetX =
+        opts?.diveTargetX !== undefined
+          ? clamp(opts.diveTargetX, -maxDiveX, maxDiveX)
+          : clamp(gk.pos.x + lateralSign * 2.65, -maxDiveX, maxDiveX);
+      gk.animState = rt.gkPreferParry ? 'gk_parry_left' : 'gk_dive_left';
     } else if (dir === 'right') {
+      const lateralSign = rightSignX;
       rt.gkDiveState = 'right';
-      rt.gkDiveDirVec = { x: rightSignX, y: 0, z: 0 };
-      gk.animState = 'gk_dive_right';
+      rt.gkDiveDirVec = { x: lateralSign, y: 0, z: 0 };
+      rt.gkDiveTargetX =
+        opts?.diveTargetX !== undefined
+          ? clamp(opts.diveTargetX, -maxDiveX, maxDiveX)
+          : clamp(gk.pos.x + lateralSign * 2.65, -maxDiveX, maxDiveX);
+      gk.animState = rt.gkPreferParry ? 'gk_parry_right' : 'gk_dive_right';
     } else {
       rt.gkDiveState = 'catch';
       rt.gkDiveDirVec = { x: 0, y: 0, z: 0 };
+      rt.gkDiveTargetX = gk.pos.x;
       gk.animState = 'gk_catch';
     }
 
@@ -2886,6 +4182,7 @@ export class MatchEngine implements IMatchEngine {
   private issueCardToPlayer(targetId: string, color: 'yellow' | 'red', reason: string): void {
     const targetRt = this.entities.find((e) => e.entity.id === targetId);
     if (!targetRt || targetRt.entity.isSentOff) return;
+    if (this.phase === 'red_card_drama' && this.dramaCtx?.offenderId === targetId) return;
 
     const refRt = this.entities.find((e) => e.entity.role === 'referee');
     if (refRt) {
@@ -2905,53 +4202,839 @@ export class MatchEngine implements IMatchEngine {
       }
       this.setSpeech(targetRt, 'ليه أصفر يا كابتن?! والله ما لمسته! 🟨😤', 2.6);
       this.pushEvent(`${targetRt.entity.name}: ${reason}`, '🟨', 'card_yellow');
+
+      // Football-law stoppage trigger #3: foul/yellow card allows queued substitution!
+      if (this.pendingSub && (this.phase === 'playing' || this.phase === 'paused_whistle')) {
+        this.beginSubstitutionStoppage('توقف للإنذار — تبديل رسمي! 🟨🔄');
+        return;
+      }
     } else {
       this.sendOffPlayer(targetRt, `${targetRt.entity.name}: ${reason}`);
+      return;
     }
 
     this.syncStoreImmediate();
   }
 
   private sendOffPlayer(targetRt: EntityRuntime, message: string): void {
-    targetRt.entity.isSentOff = true;
+    const config = this.stadium.config;
+
+    // Immediate fallback if outside live match play or benched
+    if (
+      targetRt.entity.isBenched ||
+      this.phase === 'menu' ||
+      this.phase === 'lobby' ||
+      this.phase === 'full_time'
+    ) {
+      targetRt.entity.isSentOff = true;
+      targetRt.redCards += 1;
+      this.sound.playCard('red');
+      this.sound.playCrowdReaction('boo');
+      this.pushEvent(message, '🟥', 'card_red');
+      this.transferHumanFromSentOff(targetRt);
+      this.syncStoreImmediate();
+      return;
+    }
+
+    // Cancel any queued sub involving this sent-off player and return reserve to bench
+    if (this.pendingSub && this.pendingSub.outPlayerId === targetRt.entity.id) {
+      const prevReserve = this.entities.find((e) => e.entity.id === this.pendingSub?.inPlayerId);
+      if (prevReserve && prevReserve.entity.isBenched) {
+        const rTeam: TeamId = prevReserve.entity.team === 'blue' ? 'blue' : 'red';
+        prevReserve.entity.pos = {
+          ...this.stadium.getBenchSeatPosition(rTeam, Math.max(0, prevReserve.benchSlotIndex)),
+        };
+        prevReserve.entity.rotY = -Math.PI / 2;
+        prevReserve.entity.animState = 'sitting_bench';
+      }
+      this.pendingSub = null;
+      this.pendingSubWaitSec = 0;
+    }
+
     targetRt.redCards += 1;
+    targetRt.slideTimer = 0;
+    targetRt.knockbackTimer = 0;
+    targetRt.vx = 0;
+    targetRt.vz = 0;
+
+    this.possessorId = null;
+    this.gkCaughtById = null;
+    this.penaltyCtx = null;
+    this.isChargingShot = false;
+    this.shotCharge = 0;
+    this.aimCurl = 0;
+    this.guestIsChargingShot = false;
+    this.guestShotCharge = 0;
+
+    this.ball.setFrozen(false);
+    this.ball.setPositionAndStop({
+      x: clamp(this.ball.state.pos.x, -config.halfWidth + 0.8, config.halfWidth - 0.8),
+      y: 0.42,
+      z: clamp(this.ball.state.pos.z, -config.halfLength + 1.0, config.halfLength - 1.0),
+    });
+
+    this.sound.playWhistle('long');
     this.sound.playCard('red');
     this.sound.playCrowdReaction('boo');
+    this.crowdExcitement = Math.min(1, this.crowdExcitement + 0.68);
     this.pushEvent(message, '🟥', 'card_red');
 
-    if (this.possessorId === targetRt.entity.id) {
-      this.possessorId = null;
+    const refRt = this.entities.find((e) => e.entity.role === 'referee');
+    if (refRt) {
+      if (distXZ(refRt.entity.pos, targetRt.entity.pos) > 5.2) {
+        const toCenter = normalizeXZ(-targetRt.entity.pos.x, -targetRt.entity.pos.z);
+        refRt.entity.pos = {
+          x: clamp(targetRt.entity.pos.x + toCenter.x * 2.8, -config.halfWidth + 1.5, config.halfWidth - 1.5),
+          y: 0,
+          z: clamp(targetRt.entity.pos.z + toCenter.z * 2.8, -config.halfLength + 2.0, config.halfLength - 2.0),
+        };
+      }
+      refRt.entity.rotY = Math.atan2(
+        targetRt.entity.pos.x - refRt.entity.pos.x,
+        targetRt.entity.pos.z - refRt.entity.pos.z
+      );
+      refRt.entity.animState = 'ref_red_card';
+      refRt.animLockTimer = 1.35;
+      this.setSpeech(refRt, 'كارت أحمر مباشر!! برّه الملعب! 🟥👉', 2.3);
     }
 
-    // If Host's controlled outfield player got sent off, transfer to an active teammate (excluding Guest!)
-    if (targetRt.entity.isHumanControlled && targetRt.entity.role === 'outfield') {
-      const nextTeammate = this.entities.find(
-        (e) =>
-          e.entity.team === targetRt.entity.team &&
-          e.entity.role === 'outfield' &&
-          !e.entity.isBenched &&
-          !e.entity.isSentOff &&
-          e.entity.id !== targetRt.entity.id &&
-          e.entity.id !== this.guestControlledId
-      );
-      this.assignActorControlTo('host', nextTeammate ? nextTeammate.entity.id : null);
-    }
+    const shockLine = 'أنا يا كابتن?! والله ما لمسته!! 😱🟥';
+    targetRt.entity.rotY = refRt
+      ? Math.atan2(
+          refRt.entity.pos.x - targetRt.entity.pos.x,
+          refRt.entity.pos.z - targetRt.entity.pos.z
+        )
+      : -Math.PI / 2;
+    targetRt.entity.animState = 'red_card_shock';
+    targetRt.animLockTimer = 1.3;
+    this.setSpeech(targetRt, shockLine, 2.4);
 
-    // If Guest's controlled outfield player got sent off, transfer to an active teammate (excluding Host!)
-    if (targetRt.entity.isRemoteHuman && targetRt.entity.role === 'outfield') {
-      const nextTeammate = this.entities.find(
-        (e) =>
-          e.entity.team === targetRt.entity.team &&
-          e.entity.role === 'outfield' &&
-          !e.entity.isBenched &&
-          !e.entity.isSentOff &&
-          e.entity.id !== targetRt.entity.id &&
-          e.entity.id !== this.controlledPlayerId
-      );
-      this.assignActorControlTo('guest', nextTeammate ? nextTeammate.entity.id : null);
-    }
+    const team: TeamId = targetRt.entity.team === 'blue' ? 'blue' : 'red';
+    const exitPos: Vec3 = {
+      x: -config.halfWidth - 3.0,
+      y: 0,
+      z: clamp(targetRt.entity.pos.z, -14, 14),
+    };
+
+    this.phase = 'red_card_drama';
+    this.setJumbotronHeadline('طرد أحمر مباشر! 🟥', 5.5);
+    this.dramaCtx = {
+      kind: 'red_card',
+      stageTimer: 0,
+      midShoutDone: false,
+      offenderId: targetRt.entity.id,
+      refId: refRt?.entity.id ?? null,
+      team,
+      benchSlotIndex: -1,
+      benchSeatPos: { x: 0, y: 0, z: 0 },
+      touchlineExitPos: exitPos,
+      tacticalEntryPos: { x: 0, y: 0, z: 0 },
+      previousCamera: this.activeCamera,
+    };
+    this.dramaState = {
+      kind: 'red_card',
+      stage: 'confrontation',
+      team,
+      primaryPlayerId: targetRt.entity.id,
+      primaryPlayerName: targetRt.entity.name,
+      primaryPlayerNumber: targetRt.entity.number,
+      headline: 'طرد أحمر مباشر! 🟥',
+      subtext: shockLine,
+      elapsed: 0,
+      duration: 4.85,
+    };
 
     this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
+  private transferHumanFromSentOff(targetRt: EntityRuntime): void {
+    const rules = useGameStore.getState().rules;
+    if (targetRt.entity.isHumanControlled) {
+      if (targetRt.entity.role === 'outfield' || targetRt.entity.role === 'goalkeeper') {
+        const nextTeammate = this.entities.find(
+          (e) =>
+            e.entity.team === targetRt.entity.team &&
+            e.entity.role === 'outfield' &&
+            !e.entity.isBenched &&
+            !e.entity.isSentOff &&
+            e.entity.id !== targetRt.entity.id &&
+            e.entity.id !== this.guestControlledId
+        );
+        this.assignActorControlTo('host', nextTeammate ? nextTeammate.entity.id : null);
+        if (targetRt.entity.role === 'goalkeeper') {
+          this.humanSlot.role = nextTeammate ? 'outfield' : 'spectator';
+          this.activeCamera = nextTeammate
+            ? this.resolveAllowedOutfieldCamera(rules)
+            : 'broadcast_top';
+          this.humanSlot.cameraMode = this.activeCamera;
+          this.cameraDirector.snapNextFrame();
+        }
+      }
+    }
+
+    if (targetRt.entity.isRemoteHuman) {
+      if (targetRt.entity.role === 'outfield' || targetRt.entity.role === 'goalkeeper') {
+        const nextTeammate = this.entities.find(
+          (e) =>
+            e.entity.team === targetRt.entity.team &&
+            e.entity.role === 'outfield' &&
+            !e.entity.isBenched &&
+            !e.entity.isSentOff &&
+            e.entity.id !== targetRt.entity.id &&
+            e.entity.id !== this.controlledPlayerId
+        );
+        this.assignActorControlTo('guest', nextTeammate ? nextTeammate.entity.id : null);
+        if (targetRt.entity.role === 'goalkeeper') {
+          this.guestSlot.role = nextTeammate ? 'outfield' : 'spectator';
+          this.guestSlot.cameraMode = nextTeammate
+            ? this.resolveAllowedOutfieldCamera(rules, this.guestSlot.cameraMode)
+            : 'broadcast_top';
+          useGameStore.getState().setGuestSlot(this.guestSlot);
+          this.broadcastLobbySync();
+        }
+      }
+    }
+  }
+
+  private stepRedCardDrama(dt: number): void {
+    const ctx = this.dramaCtx;
+    const config = this.stadium.config;
+    if (!ctx || ctx.kind !== 'red_card' || !ctx.offenderId) {
+      this.finishRedCardDrama();
+      return;
+    }
+
+    const offender = this.entities.find((e) => e.entity.id === ctx.offenderId);
+    if (!offender) {
+      this.finishRedCardDrama();
+      return;
+    }
+    const refRt = ctx.refId ? this.entities.find((e) => e.entity.id === ctx.refId) : null;
+
+    this.dramaState.elapsed += dt;
+    ctx.stageTimer += dt;
+
+    // Keep all other players standing on the pitch and looking toward the sent-off player
+    for (const rt of this.entities) {
+      if (rt.entity.id === offender.entity.id) continue;
+      if (rt.entity.isBenched) {
+        this.stepBenchedPlayer(rt, dt);
+        continue;
+      }
+      if (rt.entity.isSentOff) {
+        this.stepSentOffPlayer(rt, dt);
+        continue;
+      }
+      rt.vx = 0;
+      rt.vz = 0;
+      const lookYaw = Math.atan2(
+        offender.entity.pos.x - rt.entity.pos.x,
+        offender.entity.pos.z - rt.entity.pos.z
+      );
+      rt.entity.rotY = lerpAngle(rt.entity.rotY, lookYaw, 1 - Math.exp(-8 * dt));
+      if (rt.entity.role === 'referee' && this.dramaState.stage === 'confrontation') {
+        rt.entity.animState = 'ref_red_card';
+      } else {
+        rt.entity.animState = 'idle';
+      }
+    }
+
+    if (this.dramaState.stage === 'confrontation') {
+      offender.entity.animState = 'red_card_shock';
+      if (ctx.stageTimer >= 1.25) {
+        this.dramaState.stage = 'walk_off';
+        ctx.stageTimer = 0;
+        ctx.midShoutDone = false;
+        offender.entity.animState = 'walk_of_shame';
+        this.syncStoreImmediate();
+      }
+      return;
+    }
+
+    // Stage 2: walk_off toward -X touchline!
+    if (ctx.stageTimer >= 1.15 && !ctx.midShoutDone) {
+      ctx.midShoutDone = true;
+      const angryShout = 'حسبي الله في الفار!! هتندموا! 😭🤬';
+      this.setSpeech(offender, angryShout, 2.5);
+      this.dramaState.subtext = angryShout;
+      this.sound.playCrowdReaction('ooh');
+      this.syncStoreImmediate();
+    }
+
+    const dx = ctx.touchlineExitPos.x - offender.entity.pos.x;
+    const dz = ctx.touchlineExitPos.z - offender.entity.pos.z;
+    const dist = Math.hypot(dx, dz);
+    const remSec = Math.max(0.35, 3.4 - ctx.stageTimer);
+    const baseWalkSpeed = clamp(dist / remSec, 5.8, 12.2);
+    const glancingBack = ctx.stageTimer >= 1.15 && ctx.stageTimer <= 1.65;
+    const speed = baseWalkSpeed * (glancingBack ? 0.52 : 1.0);
+
+    if (dist > 0.08) {
+      const step = Math.min(dist, speed * dt);
+      offender.entity.pos.x += (dx / dist) * step;
+      offender.entity.pos.z += (dz / dist) * step;
+    }
+
+    if (glancingBack) {
+      const backYaw = refRt
+        ? Math.atan2(
+            refRt.entity.pos.x - offender.entity.pos.x,
+            refRt.entity.pos.z - offender.entity.pos.z
+          )
+        : Math.PI / 2;
+      offender.entity.rotY = lerpAngle(offender.entity.rotY, backYaw, 1 - Math.exp(-12 * dt));
+    } else if (dist > 0.08) {
+      offender.entity.rotY = lerpAngle(
+        offender.entity.rotY,
+        Math.atan2(dx, dz),
+        1 - Math.exp(-11 * dt)
+      );
+    }
+
+    offender.entity.animState = 'walk_of_shame';
+
+    if (offender.entity.pos.x <= -config.halfWidth - 1.6 || ctx.stageTimer >= 3.6) {
+      this.finishRedCardDrama();
+    }
+  }
+
+  private finishRedCardDrama(): void {
+    const config = this.stadium.config;
+    const ctx = this.dramaCtx;
+    const offender = ctx?.offenderId
+      ? this.entities.find((e) => e.entity.id === ctx.offenderId)
+      : null;
+
+    if (offender) {
+      offender.entity.isSentOff = true;
+      offender.entity.pos.x = Math.min(offender.entity.pos.x, -config.halfWidth - 4.8);
+      offender.entity.pos.y = 0;
+      offender.entity.rotY = Math.PI / 2;
+      offender.entity.animState = 'protest';
+      offender.vx = 0;
+      offender.vz = 0;
+      this.transferHumanFromSentOff(offender);
+    }
+
+    this.dramaCtx = null;
+    this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+    this.setJumbotronHeadline(null, 0);
+
+    // If the red card came from a foul, award the resulting Free Kick or Penalty cleanly!
+    if (this.postRedCardResume) {
+      const resume = this.postRedCardResume;
+      this.postRedCardResume = null;
+      if (resume.kind === 'freeKick') {
+        this.startFreeKick(resume.forTeam, resume.spot, resume.reason, 'red');
+        return;
+      }
+      if (resume.kind === 'penalty') {
+        this.startPenaltyKick(resume.forTeam, resume.reason);
+        return;
+      }
+    }
+
+    this.phase = 'playing';
+    this.sound.playWhistle('short');
+    this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
+  private queueOrStartSubstitution(
+    sub: PendingSubstitution,
+    outRt: EntityRuntime,
+    inRt: EntityRuntime,
+    reasonLabel?: string
+  ): void {
+    // Cleanly return any previously waiting reserve back to their dugout seat
+    if (this.pendingSub && this.pendingSub.inPlayerId !== sub.inPlayerId) {
+      const prevReserve = this.entities.find((e) => e.entity.id === this.pendingSub?.inPlayerId);
+      if (prevReserve && prevReserve.entity.isBenched) {
+        const rTeam: TeamId = prevReserve.entity.team === 'blue' ? 'blue' : 'red';
+        prevReserve.entity.pos = {
+          ...this.stadium.getBenchSeatPosition(rTeam, Math.max(0, prevReserve.benchSlotIndex)),
+        };
+        prevReserve.entity.rotY = -Math.PI / 2;
+        prevReserve.entity.animState = 'sitting_bench';
+      }
+    }
+
+    this.pendingSub = sub;
+    this.pendingSubWaitSec = 0;
+
+    const stats = this.coachAI.getDisciplineTracker().getTeamStats(sub.team);
+    const subBadge = `(${stats.subsUsed}/${stats.maxSubs})`;
+    const reasonSuffix = reasonLabel ? ` — ${reasonLabel}` : '';
+
+    if (this.phase === 'paused_whistle' || this.phase === 'kickoff') {
+      this.beginSubstitutionStoppage(`توقف اللعب — تبديل رسمي ${subBadge}${reasonSuffix}! 🏁🔄`);
+      return;
+    }
+
+    // Queue for next football-law stoppage; reserve jogs eagerly to +X touchline!
+    this.sound.playBenchBuzzer();
+    this.setSpeech(inRt, 'جاهز يا كوتش! نزلني! 🔥', 3.2);
+    this.pushEvent(
+      `🪧 تبديل ${subBadge}: ${outRt.entity.name} ⟵ ${inRt.entity.name}${reasonSuffix}`,
+      '🪧',
+      'bench'
+    );
+    this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
+  private beginSubstitutionStoppage(reasonText = 'توقف اللعب — تبديل رسمي! 🏁🔄'): void {
+    const sub = this.pendingSub;
+    if (!sub) return;
+
+    const outRt = this.entities.find((e) => e.entity.id === sub.outPlayerId);
+    const inRt = this.entities.find((e) => e.entity.id === sub.inPlayerId);
+    if (
+      !outRt ||
+      !inRt ||
+      outRt.entity.isBenched ||
+      outRt.entity.isSentOff ||
+      !inRt.entity.isBenched ||
+      inRt.entity.isSentOff
+    ) {
+      this.pendingSub = null;
+      this.pendingSubWaitSec = 0;
+      this.syncStoreImmediate();
+      return;
+    }
+
+    const config = this.stadium.config;
+    this.possessorId = null;
+    this.gkCaughtById = null;
+    this.penaltyCtx = null;
+    this.isChargingShot = false;
+    this.shotCharge = 0;
+    this.aimCurl = 0;
+    this.guestIsChargingShot = false;
+    this.guestShotCharge = 0;
+
+    this.ball.setFrozen(false);
+    this.ball.setPositionAndStop({
+      x: clamp(this.ball.state.pos.x, -config.halfWidth + 0.8, config.halfWidth - 0.8),
+      y: 0.42,
+      z: clamp(this.ball.state.pos.z, -config.halfLength + 1.2, config.halfLength - 1.2),
+    });
+
+    this.sound.playWhistle('double');
+    this.sound.playBenchBuzzer();
+
+    const refRt = this.entities.find((e) => e.entity.role === 'referee');
+    if (refRt) {
+      refRt.entity.animState = 'ref_whistle';
+      refRt.animLockTimer = 0.95;
+      this.setSpeech(refRt, 'توقف اللعب — تبديل رسمي! 🏁🔄', 2.5);
+    }
+
+    const team = sub.team;
+    const seatIdx = inRt.benchSlotIndex >= 0 ? inRt.benchSlotIndex : 0;
+    const benchSeatPos = this.stadium.getBenchSeatPosition(team, seatIdx);
+    const exchangeZ = team === 'red' ? -4.5 : 4.5;
+    const touchlineExitPos: Vec3 = {
+      x: config.halfWidth + 0.6,
+      y: 0,
+      z: exchangeZ,
+    };
+    const tacticalEntryPos: Vec3 = {
+      x: config.halfWidth - 6.5,
+      y: 0,
+      z: clamp(this.ball.state.pos.z * 0.35 + (team === 'red' ? -3.5 : 3.5), -16, 16),
+    };
+
+    outRt.slideTimer = 0;
+    outRt.knockbackTimer = 0;
+    outRt.vx = 0;
+    outRt.vz = 0;
+    const walkOffLine = 'أنا يا كوتش?! ده أنا نجم الماتش! 😤🪑';
+    outRt.entity.animState = 'sub_walk_off';
+    this.setSpeech(outRt, walkOffLine, 2.8);
+
+    // Position incoming reserve right at the +X touchline clapping eagerly
+    inRt.entity.pos = {
+      x: config.halfWidth + 1.15,
+      y: 0,
+      z: exchangeZ + (team === 'red' ? 1.15 : -1.15),
+    };
+    inRt.entity.rotY = -Math.PI / 2;
+    inRt.entity.animState = 'sub_enter_pitch';
+
+    this.phase = 'substitution_stoppage';
+    this.setJumbotronHeadline('تبديل رسمي! 🔄', 4.5);
+    this.pushEvent(reasonText, '🔄', 'bench');
+
+    this.dramaCtx = {
+      kind: 'substitution',
+      stageTimer: 0,
+      midShoutDone: false,
+      outPlayerId: outRt.entity.id,
+      inPlayerId: inRt.entity.id,
+      refId: refRt?.entity.id ?? null,
+      team,
+      benchSlotIndex: seatIdx,
+      benchSeatPos,
+      touchlineExitPos,
+      tacticalEntryPos,
+      requestedByHumanBench: sub.requestedByHumanBench,
+      actor: sub.actor,
+      previousCamera: this.activeCamera,
+    };
+    this.dramaState = {
+      kind: 'substitution',
+      stage: 'walk_off',
+      team,
+      primaryPlayerId: outRt.entity.id,
+      primaryPlayerName: outRt.entity.name,
+      primaryPlayerNumber: outRt.entity.number,
+      secondaryPlayerId: inRt.entity.id,
+      secondaryPlayerName: inRt.entity.name,
+      secondaryPlayerNumber: inRt.entity.number,
+      headline: 'تبديل رسمي! 🔄',
+      subtext: walkOffLine,
+      elapsed: 0,
+      duration: 3.45,
+    };
+
+    this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
+  private stepSubstitutionStoppage(dt: number, rules: AdminRules): void {
+    const ctx = this.dramaCtx;
+    const config = this.stadium.config;
+    if (!ctx || ctx.kind !== 'substitution' || !ctx.outPlayerId || !ctx.inPlayerId) {
+      this.finishSubstitutionStoppage(rules);
+      return;
+    }
+
+    const outRt = this.entities.find((e) => e.entity.id === ctx.outPlayerId);
+    const inRt = this.entities.find((e) => e.entity.id === ctx.inPlayerId);
+    if (!outRt || !inRt) {
+      this.finishSubstitutionStoppage(rules);
+      return;
+    }
+
+    this.dramaState.elapsed += dt;
+    ctx.stageTimer += dt;
+
+    // Keep other pitch players standing and watching the touchline exchange
+    for (const rt of this.entities) {
+      if (rt.entity.id === outRt.entity.id || rt.entity.id === inRt.entity.id) continue;
+      if (rt.entity.isBenched) {
+        this.stepBenchedPlayer(rt, dt);
+        continue;
+      }
+      if (rt.entity.isSentOff) {
+        this.stepSentOffPlayer(rt, dt);
+        continue;
+      }
+      rt.vx = 0;
+      rt.vz = 0;
+      const lookYaw = Math.atan2(
+        ctx.touchlineExitPos.x - rt.entity.pos.x,
+        ctx.touchlineExitPos.z - rt.entity.pos.z
+      );
+      rt.entity.rotY = lerpAngle(rt.entity.rotY, lookYaw, 1 - Math.exp(-8 * dt));
+      if (rt.animLockTimer <= 0) {
+        rt.entity.animState = 'idle';
+      }
+    }
+
+    if (this.dramaState.stage === 'walk_off') {
+      const dx = ctx.touchlineExitPos.x - outRt.entity.pos.x;
+      const dz = ctx.touchlineExitPos.z - outRt.entity.pos.z;
+      const dist = Math.hypot(dx, dz);
+      const remSec = Math.max(0.25, 2.25 - ctx.stageTimer);
+      const walkSpeed = clamp(dist / remSec, 6.2, 16.5);
+      if (dist > 0.1) {
+        const step = Math.min(dist, walkSpeed * dt);
+        outRt.entity.pos.x += (dx / dist) * step;
+        outRt.entity.pos.z += (dz / dist) * step;
+        outRt.entity.rotY = lerpAngle(
+          outRt.entity.rotY,
+          Math.atan2(dx, dz),
+          1 - Math.exp(-12 * dt)
+        );
+      }
+      outRt.entity.animState = 'sub_walk_off';
+      inRt.entity.rotY = -Math.PI / 2;
+      inRt.entity.animState = 'sub_enter_pitch';
+
+      if (outRt.entity.pos.x >= config.halfWidth + 0.55 || ctx.stageTimer >= 2.4) {
+        this.dramaState.stage = 'enter_pitch';
+        const enterLine = 'يلا بينا نقلب الماتش! 🔥';
+        this.dramaState.subtext = enterLine;
+        ctx.stageTimer = 0;
+        inRt.entity.isBenched = false;
+        inRt.benchSlotIndex = -1;
+        inRt.entity.stamina = 100;
+        inRt.entity.animState = 'sub_enter_pitch';
+        this.setSpeech(inRt, enterLine, 2.6);
+        this.sound.playCrowdReaction('cheer');
+        this.effects.spawnBurst(inRt.entity.pos, 0x10b981, 16, 3.2);
+        this.syncStoreImmediate();
+      }
+      return;
+    }
+
+    // Stage 2: enter_pitch (~1.15s) — outgoing walks to 3D dugout seat while incoming sprints onto pitch!
+    const bDx = ctx.benchSeatPos.x - outRt.entity.pos.x;
+    const bDz = ctx.benchSeatPos.z - outRt.entity.pos.z;
+    const bDist = Math.hypot(bDx, bDz);
+    if (bDist > 0.14) {
+      const step = Math.min(bDist, 5.6 * dt);
+      outRt.entity.pos.x += (bDx / bDist) * step;
+      outRt.entity.pos.z += (bDz / bDist) * step;
+      outRt.entity.pos.y = ctx.benchSeatPos.y * clamp(1 - bDist / 3.2, 0, 1);
+      outRt.entity.rotY = lerpAngle(
+        outRt.entity.rotY,
+        Math.atan2(bDx, bDz),
+        1 - Math.exp(-10 * dt)
+      );
+      outRt.entity.animState = 'sub_walk_off';
+    } else {
+      outRt.entity.pos = { ...ctx.benchSeatPos };
+      outRt.entity.rotY = -Math.PI / 2;
+      outRt.entity.animState = 'bench_rage';
+    }
+
+    const eDx = ctx.tacticalEntryPos.x - inRt.entity.pos.x;
+    const eDz = ctx.tacticalEntryPos.z - inRt.entity.pos.z;
+    const eDist = Math.hypot(eDx, eDz);
+    if (eDist > 0.14) {
+      const sprintSpeed = clamp(eDist / Math.max(0.2, 1.05 - ctx.stageTimer), 8.2, 12.6);
+      const step = Math.min(eDist, sprintSpeed * dt);
+      inRt.entity.pos.x += (eDx / eDist) * step;
+      inRt.entity.pos.z += (eDz / eDist) * step;
+      inRt.entity.pos.y = 0;
+      inRt.entity.rotY = lerpAngle(
+        inRt.entity.rotY,
+        Math.atan2(eDx, eDz),
+        1 - Math.exp(-14 * dt)
+      );
+    } else {
+      const toBallYaw = Math.atan2(
+        this.ball.state.pos.x - inRt.entity.pos.x,
+        this.ball.state.pos.z - inRt.entity.pos.z
+      );
+      inRt.entity.rotY = lerpAngle(inRt.entity.rotY, toBallYaw, 1 - Math.exp(-10 * dt));
+    }
+    inRt.entity.animState = 'sub_enter_pitch';
+
+    if (ctx.stageTimer >= 1.15) {
+      this.finishSubstitutionStoppage(rules);
+    }
+  }
+
+  private finishSubstitutionStoppage(rules: AdminRules): void {
+    const config = this.stadium.config;
+    const ctx = this.dramaCtx;
+    const outRt = ctx?.outPlayerId
+      ? this.entities.find((e) => e.entity.id === ctx.outPlayerId)
+      : null;
+    const inRt = ctx?.inPlayerId
+      ? this.entities.find((e) => e.entity.id === ctx.inPlayerId)
+      : null;
+
+    if (outRt && ctx) {
+      outRt.entity.isBenched = true;
+      outRt.benchSlotIndex = ctx.benchSlotIndex;
+      outRt.entity.pos = { ...ctx.benchSeatPos };
+      outRt.entity.rotY = -Math.PI / 2;
+      outRt.entity.animState = 'sitting_bench';
+      outRt.vx = 0;
+      outRt.vz = 0;
+    }
+
+    if (inRt) {
+      inRt.entity.isBenched = false;
+      inRt.benchSlotIndex = -1;
+      inRt.entity.pos.x = clamp(inRt.entity.pos.x, -config.halfWidth + 1.2, config.halfWidth - 1.2);
+      inRt.entity.pos.y = 0;
+      inRt.entity.pos.z = clamp(inRt.entity.pos.z, -config.halfLength + 1.2, config.halfLength - 1.2);
+      inRt.entity.stamina = 100;
+      inRt.entity.animState = 'idle';
+    }
+
+    // Handle Host/Guest bench_cam or return-from-bench camera transitions cleanly!
+    if (inRt && (inRt.entity.isHumanControlled || (ctx?.requestedByHumanBench && ctx.actor === 'host'))) {
+      this.assignActorControlTo('host', inRt.entity.id);
+      this.humanSlot.isBenched = false;
+      this.humanSlot.role = 'outfield';
+      this.activeCamera = this.resolveAllowedOutfieldCamera(rules);
+      this.humanSlot.cameraMode = this.activeCamera;
+      this.cameraDirector.snapNextFrame();
+    } else if (outRt && outRt.entity.isHumanControlled) {
+      this.humanSlot.isBenched = true;
+      this.activeCamera = 'bench_cam';
+      this.humanSlot.cameraMode = 'bench_cam';
+      this.inputManager.exitPointerLock();
+      this.cameraDirector.snapNextFrame();
+    }
+
+    if (inRt && (inRt.entity.isRemoteHuman || (ctx?.requestedByHumanBench && ctx.actor === 'guest'))) {
+      this.assignActorControlTo('guest', inRt.entity.id);
+      this.guestSlot.isBenched = false;
+      this.guestSlot.role = 'outfield';
+      this.guestSlot.cameraMode = this.resolveAllowedOutfieldCamera(rules, this.guestSlot.cameraMode);
+      useGameStore.getState().setGuestSlot(this.guestSlot);
+      this.broadcastLobbySync();
+    } else if (outRt && outRt.entity.isRemoteHuman) {
+      this.guestSlot.isBenched = true;
+      this.guestSlot.cameraMode = 'bench_cam';
+      useGameStore.getState().setGuestSlot(this.guestSlot);
+      this.broadcastLobbySync();
+    }
+
+    if (outRt && inRt) {
+      this.pushEvent(
+        `تبديل رسمي! خرج ${outRt.entity.name} للدكة ونزل ${inRt.entity.name} للملعب! 🔄🔥`,
+        '🔄',
+        'bench'
+      );
+    }
+
+    this.dramaCtx = null;
+    this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+    this.pendingSub = null;
+    this.pendingSubWaitSec = 0;
+    this.setJumbotronHeadline(null, 0);
+    this.phase = 'playing';
+    this.sound.playWhistle('short');
+    this.syncStoreImmediate();
+    this.broadcastWorldSnapshot();
+  }
+
+  private installDebugBridge(): void {
+    if (typeof window === 'undefined') return;
+    const bridge = {
+      getState: () => ({
+        phase: this.phase,
+        clockSec: this.clockSec,
+        score: { ...this.score },
+        aiDifficulty: useGameStore.getState().rules.aiDifficulty,
+        pendingSub: this.pendingSub ? { ...this.pendingSub } : null,
+        dramaState: { ...this.dramaState },
+        ball: {
+          pos: { ...this.ball.state.pos },
+          vel: { ...this.ball.state.vel },
+        },
+        players: this.entities.map((e) => ({
+          id: e.entity.id,
+          name: e.entity.name,
+          team: e.entity.team,
+          role: e.entity.role,
+          pos: { ...e.entity.pos },
+          rotY: e.entity.rotY,
+          animState: e.entity.animState,
+          isBenched: e.entity.isBenched,
+          isSentOff: e.entity.isSentOff,
+          saves: e.saves,
+          yellowCards: e.entity.yellowCards,
+          redCards: e.redCards,
+          gkDiveState: e.gkDiveState,
+        })),
+      }),
+      dispatch: (cmd: GameCommand) => this.dispatchCommand(cmd),
+      triggerTestShot: (
+        targetTeam: TeamId,
+        cornerX?: number,
+        power?: number,
+        lift?: number
+      ) => {
+        const config = this.stadium.config;
+        const attackingTeam: TeamId = targetTeam === 'red' ? 'blue' : 'red';
+        const targetGoalZ = targetTeam === 'red' ? -config.halfLength : config.halfLength;
+        const startZ = targetTeam === 'red' ? -config.halfLength + 13.0 : config.halfLength - 13.0;
+        const aimX = cornerX ?? config.goalWidth * 0.34;
+        const shotPower = power ?? 24.5;
+        const shotLift = lift ?? 2.6;
+
+        if (this.phase !== 'playing') {
+          this.phase = 'playing';
+        }
+        this.possessorId = null;
+        this.gkCaughtById = null;
+        this.gkSaveGraceTimer = 0;
+
+        // Clear any outfielder standing directly in the 13m test lane so shot reaches GK cleanly
+        for (const rt of this.entities) {
+          if (
+            rt.entity.role === 'outfield' &&
+            !rt.entity.isBenched &&
+            !rt.entity.isSentOff &&
+            Math.abs(rt.entity.pos.x) < 4.5 &&
+            Math.abs(rt.entity.pos.z - startZ) < 9.0
+          ) {
+            rt.entity.pos.x = rt.entity.pos.x >= 0 ? 6.5 : -6.5;
+          }
+        }
+
+        const shooter = this.entities.find(
+          (e) =>
+            e.entity.team === attackingTeam &&
+            e.entity.role === 'outfield' &&
+            !e.entity.isBenched &&
+            !e.entity.isSentOff
+        );
+
+        this.ball.setFrozen(false);
+        this.ball.setPositionAndStop({ x: 0, y: 0.42, z: startZ });
+        const dir = normalizeXZ(aimX, targetGoalZ - startZ);
+        this.ball.kick(
+          dir,
+          shotPower,
+          shotLift,
+          shotPower >= 27,
+          shooter?.entity.id,
+          attackingTeam
+        );
+        this.sound.playKick(clamp(shotPower / 34, 0.4, 1));
+      },
+      triggerTestRedCard: (playerId?: string) => {
+        const candidate = playerId
+          ? this.entities.find((e) => e.entity.id === playerId)
+          : this.entities.find(
+              (e) =>
+                e.entity.role === 'outfield' &&
+                !e.entity.isBenched &&
+                !e.entity.isSentOff &&
+                !e.entity.isHumanControlled
+            ) ??
+            this.entities.find(
+              (e) => e.entity.role === 'outfield' && !e.entity.isBenched && !e.entity.isSentOff
+            );
+        if (candidate) {
+          this.issueCardToPlayer(
+            candidate.entity.id,
+            'red',
+            'طرد أحمر مباشر بقرار الحكم! برّه الملعب! 🟥😱'
+          );
+        }
+      },
+      triggerTestTouchline: () => {
+        const config = this.stadium.config;
+        if (this.phase !== 'playing') {
+          this.phase = 'playing';
+        }
+        this.possessorId = null;
+        this.gkCaughtById = null;
+        this.ball.setFrozen(false);
+        this.ball.setPositionAndStop({
+          x: config.halfWidth - 1.1,
+          y: 0.42,
+          z: 0,
+        });
+        this.ball.kick({ x: 1, y: 0, z: 0.08 }, 11.5, 0.2, false);
+      },
+    };
+
+    this.debugBridgeRef = bridge;
+    (window as unknown as { __elmal3abDebug?: unknown }).__elmal3abDebug = bridge;
   }
 
   private startPenaltyKick(attackingTeam: TeamId, reason: string): void {
@@ -3213,6 +5296,15 @@ export class MatchEngine implements IMatchEngine {
     this.varCtx = null;
     this.penaltyCtx = null;
     this.pendingIncident = null;
+    this.pendingSub = null;
+    this.pendingSubWaitSec = 0;
+    this.postRedCardResume = null;
+    this.matchElapsedSec = 0;
+    this.callForPass = { ...INITIAL_CALL_FOR_PASS_STATE };
+    this.lastPasserId = null;
+    this.lastPassReceiverNotifiedId = null;
+    this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+    this.dramaCtx = null;
     this.possessorId = null;
     this.gkCaughtById = null;
     this.isChargingShot = false;
@@ -3232,6 +5324,8 @@ export class MatchEngine implements IMatchEngine {
     this.gkAI.reset();
     this.refAI.reset();
     this.coachAI.reset();
+    this.freeKickDirector.reset();
+    this.penaltyShootoutDirector.reset();
     this.stadium.setVARActive(false);
     this.ball.setFrozen(false);
 
@@ -3279,6 +5373,14 @@ export class MatchEngine implements IMatchEngine {
 
   private finishMatch(): void {
     this.phase = 'full_time';
+    this.pendingSub = null;
+    this.pendingSubWaitSec = 0;
+    this.postRedCardResume = null;
+    this.callForPass = { ...INITIAL_CALL_FOR_PASS_STATE };
+    this.freeKickDirector.reset();
+    this.penaltyShootoutDirector.reset();
+    this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+    this.dramaCtx = null;
     this.isChargingShot = false;
     this.shotCharge = 0;
     this.aimCurl = 0;
@@ -3378,6 +5480,10 @@ export class MatchEngine implements IMatchEngine {
       knockOnBoostTimer: 0,
       gkDiveState: 'none',
       gkDiveDirVec: { x: 0, y: 0, z: 0 },
+      gkDiveTargetX: null,
+      gkDiveSpeed: 9.5,
+      gkPreferParry: false,
+      gkDiveHeight: 'mid',
       slideDirVec: { x: 0, y: 0, z: 1 },
       slideTimer: 0,
       jukeImmuneTimer: 0,
@@ -3657,6 +5763,10 @@ export class MatchEngine implements IMatchEngine {
       rt.vz = 0;
       rt.slideTimer = 0;
       rt.gkDiveState = 'none';
+      rt.gkDiveTargetX = null;
+      rt.gkDiveSpeed = 9.5;
+      rt.gkPreferParry = false;
+      rt.gkDiveHeight = 'mid';
 
       if (p.isBenched) {
         const team: TeamId = p.team === 'blue' ? 'blue' : 'red';
@@ -3728,6 +5838,8 @@ export class MatchEngine implements IMatchEngine {
       (this.inputManager.isSprinting() || this.externalSprint) &&
       (controlledRt ? controlledRt.entity.stamina > 4 : false);
 
+    const dramaFocusPos = this.computeDramaFocusPos(this.entities.map((e) => e.entity));
+
     const camOut = this.cameraDirector.update(dt, this.elapsed, {
       phase: this.phase,
       cameraMode: this.activeCamera,
@@ -3743,6 +5855,9 @@ export class MatchEngine implements IMatchEngine {
       gkDiveState,
       benchSeatPos: this.getHumanBenchSeatPos(),
       varFocusPos: this.varCtx?.focusPos ?? this.ball.state.pos,
+      dramaFocusPos,
+      freeKick: this.freeKickDirector.getState(),
+      penaltyShootout: this.penaltyShootoutDirector.getState(),
     });
 
     this.characters.updateFPGloves(
@@ -3796,8 +5911,50 @@ export class MatchEngine implements IMatchEngine {
 
   private getHumanBenchSeatPos(): Vec3 {
     const rt = this.getControlledRuntime();
+    if (rt && this.pendingSub && this.pendingSub.inPlayerId === rt.entity.id) {
+      return { ...rt.entity.pos };
+    }
     const slot = rt && rt.benchSlotIndex >= 0 ? rt.benchSlotIndex : 0;
     return this.stadium.getBenchSeatPosition(this.humanSlot.team, slot);
+  }
+
+  private computeDramaFocusPos(players: ReadonlyArray<PlayerEntityState>): Vec3 | null {
+    if (this.phase === 'red_card_drama' && this.dramaState.kind === 'red_card') {
+      const offender = players.find((p) => p.id === this.dramaState.primaryPlayerId);
+      if (!offender) return null;
+      if (this.dramaState.stage === 'confrontation') {
+        const ref = players.find((p) => p.role === 'referee');
+        if (ref) {
+          return {
+            x: offender.pos.x * 0.68 + ref.pos.x * 0.32,
+            y: 0.4,
+            z: offender.pos.z * 0.68 + ref.pos.z * 0.32,
+          };
+        }
+      }
+      return { x: offender.pos.x, y: 0.35, z: offender.pos.z };
+    }
+
+    if (this.phase === 'substitution_stoppage' && this.dramaState.kind === 'substitution') {
+      const outP = players.find((p) => p.id === this.dramaState.primaryPlayerId);
+      const inP = this.dramaState.secondaryPlayerId
+        ? players.find((p) => p.id === this.dramaState.secondaryPlayerId)
+        : null;
+      if (this.dramaState.stage === 'enter_pitch' && inP) {
+        return { x: inP.pos.x, y: 0.35, z: inP.pos.z };
+      }
+      if (outP && inP) {
+        return {
+          x: outP.pos.x * 0.65 + inP.pos.x * 0.35,
+          y: 0.35,
+          z: outP.pos.z * 0.65 + inP.pos.z * 0.35,
+        };
+      }
+      if (outP) return { x: outP.pos.x, y: 0.35, z: outP.pos.z };
+      if (inP) return { x: inP.pos.x, y: 0.35, z: inP.pos.z };
+    }
+
+    return null;
   }
 
   private resolveAllowedOutfieldCamera(
@@ -3945,11 +6102,18 @@ export class MatchEngine implements IMatchEngine {
   private updateAimingGuideVisual(): void {
     if (!this.aimingGuide) return;
     const rt = this.getControlledRuntime();
+    const isFreeKickTaker =
+      this.phase === 'free_kick_setup' &&
+      Boolean(rt) &&
+      this.freeKickDirector.isTaker(rt!.entity.id);
     const show =
       Boolean(rt) &&
       this.humanSlot.role === 'outfield' &&
       !this.humanSlot.isBenched &&
-      (this.phase === 'playing' || this.phase === 'penalty_setup' || this.phase === 'kickoff');
+      (this.phase === 'playing' ||
+        this.phase === 'penalty_setup' ||
+        this.phase === 'kickoff' ||
+        isFreeKickTaker);
 
     if (!show || !rt) {
       this.hideAimingGuide();
@@ -3957,7 +6121,8 @@ export class MatchEngine implements IMatchEngine {
     }
 
     const aim = normalizeXZ(this.humanAimDir.x, this.humanAimDir.z);
-    const hasBallNearby = distXZ(rt.entity.pos, this.ball.state.pos) < 2.8;
+    const hasBallNearby =
+      isFreeKickTaker || distXZ(rt.entity.pos, this.ball.state.pos) < 2.8;
     const passTarget = hasBallNearby ? this.findAimedPassTarget(rt, aim) : null;
     const teamColor =
       rt.entity.team === 'blue'
@@ -3975,6 +6140,9 @@ export class MatchEngine implements IMatchEngine {
       passTargetPos: passTarget ? passTarget.entity.pos : null,
       teamColor,
       elapsed: this.elapsed,
+      isSetPiece: isFreeKickTaker || this.phase === 'penalty_setup',
+      isCallForPassActive:
+        this.callForPass.active && this.callForPass.callerId === rt.entity.id,
     });
   }
 
@@ -4052,6 +6220,12 @@ export class MatchEngine implements IMatchEngine {
       tactics: { ...this.tactics },
       varState,
       goalReplayState: { ...this.goalReplayState },
+      dramaState: { ...this.dramaState },
+      pendingSub: this.pendingSub ? { ...this.pendingSub } : null,
+      callForPass: { ...this.callForPass },
+      freeKick: this.freeKickDirector.getState(),
+      penaltyShootout: this.penaltyShootoutDirector.getState(),
+      coachDiscipline: this.coachAI.getDisciplineSnapshot(),
       awards: this.awards,
       activeCamera: this.activeCamera,
       isPaused: this.isPaused,
@@ -4102,6 +6276,10 @@ export class MatchEngine implements IMatchEngine {
     let headline: string | null = null;
     if (varActive) {
       headline = 'الفار بيحقق... 📺';
+    } else if (this.phase === 'red_card_drama') {
+      headline = 'طرد أحمر مباشر! 🟥';
+    } else if (this.phase === 'substitution_stoppage') {
+      headline = 'تبديل رسمي! 🔄';
     } else if (this.phase === 'goal_celebration' || this.phase === 'goal_replay') {
       headline = 'جووووول عالمي! ⚽🔥';
     } else if (this.jumbotronHeadlineTimer > 0 && this.jumbotronHeadline) {
@@ -4372,6 +6550,10 @@ export class MatchEngine implements IMatchEngine {
       this.seenSnapshotEventIds.clear();
       this.localSpeechOverrides.clear();
       this.remoteHostControlledId = null;
+      this.pendingSub = null;
+      this.pendingSubWaitSec = 0;
+      this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+      this.dramaCtx = null;
       this.ball.setFrozen(false);
       this.stadium.setVARActive(false);
       this.humanSlot = { ...store.hostSlot };
@@ -4506,6 +6688,10 @@ export class MatchEngine implements IMatchEngine {
       this.guestHitStopRemaining = 0;
       this.phase = packet.phase;
       this.goalReplayState = { ...INITIAL_GOAL_REPLAY_STATE };
+      this.pendingSub = null;
+      this.pendingSubWaitSec = 0;
+      this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
+      this.dramaCtx = null;
       this.stadium.setVARActive(false);
       this.ball.setTrajectoryVisible(false);
       this.hideAimingGuide();
@@ -4568,7 +6754,12 @@ export class MatchEngine implements IMatchEngine {
         if (
           !this.guestSlot.isBenched &&
           this.guestSlot.role === 'outfield' &&
-          (this.phase === 'playing' || this.phase === 'penalty_setup')
+          (this.phase === 'playing' ||
+            (this.phase === 'penalty_setup' &&
+              this.penaltyCtx?.shooterId === this.guestControlledId) ||
+            (this.phase === 'free_kick_setup' &&
+              Boolean(this.guestControlledId) &&
+              this.freeKickDirector.isTaker(this.guestControlledId!)))
         ) {
           this.guestIsChargingShot = true;
           this.guestShotCharge = 0.08;
@@ -4577,7 +6768,7 @@ export class MatchEngine implements IMatchEngine {
         break;
 
       case 'shootRelease':
-        if (this.guestIsChargingShot) {
+        if (this.guestIsChargingShot || this.phase === 'free_kick_setup') {
           this.handleHumanShootRelease('guest');
           this.guestIsChargingShot = false;
           this.guestShotCharge = 0;
@@ -4587,6 +6778,10 @@ export class MatchEngine implements IMatchEngine {
 
       case 'pass':
         this.handleHumanPassOrTackle('guest');
+        break;
+
+      case 'callForPass':
+        this.handleCallForPass('guest');
         break;
 
       case 'lobPass':
@@ -4649,6 +6844,12 @@ export class MatchEngine implements IMatchEngine {
         }
         break;
 
+      case 'refFreeKick':
+        if (this.guestSlot.role === 'referee') {
+          this.handleRefFreeKick(cmd.forTeam, cmd.spot, cmd.reason);
+        }
+        break;
+
       case 'refStartVAR':
         if (this.guestSlot.role === 'referee') {
           this.handleRefStartVAR(rules, cmd.reason);
@@ -4670,6 +6871,17 @@ export class MatchEngine implements IMatchEngine {
       case 'coachTactic':
         if (this.guestSlot.role === 'coach') {
           this.applyTeamTactic(cmd.team, cmd.stance, true);
+        }
+        break;
+
+      case 'triggerQueuedSubNow':
+        if (
+          this.pendingSub &&
+          (this.phase === 'playing' ||
+            this.phase === 'paused_whistle' ||
+            this.phase === 'kickoff')
+        ) {
+          this.beginSubstitutionStoppage('توقف اللعب — تبديل رسمي! 🏁🔄');
         }
         break;
 
@@ -4776,6 +6988,12 @@ export class MatchEngine implements IMatchEngine {
       tactics: { ...this.tactics },
       varState,
       goalReplayState: { ...this.goalReplayState },
+      dramaState: { ...this.dramaState },
+      pendingSub: this.pendingSub ? { ...this.pendingSub } : null,
+      callForPass: { ...this.callForPass },
+      freeKick: this.freeKickDirector.getState(),
+      penaltyShootout: this.penaltyShootoutDirector.getState(),
+      coachDiscipline: this.coachAI.getDisciplineSnapshot(),
       hitStopRemaining: this.hitStopRemaining,
       guestStamina: guestRt ? guestRt.entity.stamina : 100,
       guestShotCharge: this.guestShotCharge,
@@ -4823,7 +7041,10 @@ export class MatchEngine implements IMatchEngine {
         if (
           !this.humanSlot.isBenched &&
           this.humanSlot.role === 'outfield' &&
-          (this.phase === 'playing' || this.phase === 'penalty_setup')
+          (this.phase === 'playing' ||
+            this.phase === 'penalty_setup' ||
+            this.phase === 'free_kick_setup' ||
+            this.phase === 'penalty_shootout')
         ) {
           this.isChargingShot = true;
           this.shotCharge = 0.08;
@@ -4833,7 +7054,7 @@ export class MatchEngine implements IMatchEngine {
         return;
 
       case 'shootRelease':
-        if (this.isChargingShot) {
+        if (this.isChargingShot || this.phase === 'free_kick_setup') {
           this.isChargingShot = false;
           this.shotCharge = 0;
           this.aimCurl = 0;
@@ -4873,6 +7094,7 @@ export class MatchEngine implements IMatchEngine {
       }
 
       case 'pass':
+      case 'callForPass':
       case 'lobPass':
       case 'knockOn':
       case 'skillMove':
@@ -4885,16 +7107,19 @@ export class MatchEngine implements IMatchEngine {
       case 'refYellowCard':
       case 'refRedCard':
       case 'refPenalty':
+      case 'refFreeKick':
       case 'refStartVAR':
       case 'refVARVerdict':
       case 'coachSubToBench':
       case 'coachTactic':
+      case 'triggerQueuedSubNow':
       case 'benchEmote':
       case 'benchRequestReturn':
       case 'spectatorCheer':
       case 'spectatorBoo':
       case 'spectatorFireworks':
       case 'skipGoalReplay':
+      case 'shootoutKick':
         this.queueGuestCommand(cmd);
         return;
 
@@ -4990,6 +7215,15 @@ export class MatchEngine implements IMatchEngine {
         this.effects.spawnFireworks({ x: -12, y: 12, z: -18 }, 0xfbbf24);
         this.effects.spawnFireworks({ x: 12, y: 14, z: 18 }, 0x00c2ff);
         break;
+      case 'pass_call':
+        this.rawSound.playPassCall?.();
+        break;
+      case 'wall_spray':
+        this.rawSound.playWallSpray?.();
+        break;
+      case 'shootout_tension':
+        this.rawSound.playShootoutTension?.();
+        break;
     }
   }
 
@@ -5018,6 +7252,9 @@ export class MatchEngine implements IMatchEngine {
       this.shotCharge = 0;
       this.aimCurl = 0;
       this.score = { ...snapshot.score };
+      this.pendingSub = null;
+      this.pendingSubWaitSec = 0;
+      this.dramaState = { ...INITIAL_MATCH_DRAMA_STATE };
       this.awards = [];
       store.resetMatchStats();
     }
@@ -5240,6 +7477,10 @@ export class MatchEngine implements IMatchEngine {
     this.clockSec = activeSnap.clockSec;
     this.tactics = { ...activeSnap.tactics };
     this.goalReplayState = { ...activeSnap.goalReplayState };
+    this.dramaState = activeSnap.dramaState
+      ? { ...activeSnap.dramaState }
+      : { ...INITIAL_MATCH_DRAMA_STATE };
+    this.pendingSub = activeSnap.pendingSub ? { ...activeSnap.pendingSub } : null;
     this.controlledPlayerId = activeSnap.guestControlledId;
     this.remoteHostControlledId = activeSnap.hostControlledId;
 
@@ -5321,7 +7562,7 @@ export class MatchEngine implements IMatchEngine {
     this.effects.update(dt * animScale, interpBallPos, activeSnap.ball.isSuperShot);
     this.updateBallTrajectoryGuide();
     this.updateGuestAimingGuideVisual(controlledEntity, renderedPlayers, activeSnap);
-    this.updateGuestCameraAndVisuals(dt, controlledEntity, interpBallPos);
+    this.updateGuestCameraAndVisuals(dt, controlledEntity, interpBallPos, renderedPlayers);
     this.updateStadiumJumbotron();
 
     // 6. Compute Referee nearest target for Guest Referee HUD & sync Zustand store (~20Hz)
@@ -5369,6 +7610,20 @@ export class MatchEngine implements IMatchEngine {
         tactics: { ...this.tactics },
         varState: { ...activeSnap.varState },
         goalReplayState: { ...activeSnap.goalReplayState },
+        dramaState: { ...this.dramaState },
+        pendingSub: this.pendingSub ? { ...this.pendingSub } : null,
+        callForPass: activeSnap.callForPass
+          ? { ...activeSnap.callForPass }
+          : { ...INITIAL_CALL_FOR_PASS_STATE },
+        freeKick: activeSnap.freeKick
+          ? { ...activeSnap.freeKick }
+          : createInitialFreeKickState(),
+        penaltyShootout: activeSnap.penaltyShootout
+          ? { ...activeSnap.penaltyShootout }
+          : createInitialPenaltyShootoutState(),
+        coachDiscipline: activeSnap.coachDiscipline
+          ? { ...activeSnap.coachDiscipline }
+          : createInitialCoachDisciplineStats(),
         awards: this.awards,
         activeCamera: this.activeCamera,
         isPaused: this.isPaused,
@@ -5473,15 +7728,22 @@ export class MatchEngine implements IMatchEngine {
   private updateGuestCameraAndVisuals(
     dt: number,
     controlled: PlayerEntityState | null,
-    ballPos: Vec3
+    ballPos: Vec3,
+    players: ReadonlyArray<PlayerEntityState> = []
   ): void {
     let gkDiveState: GKDiveVisualState = 'none';
     if (controlled && controlled.role === 'goalkeeper') {
       if (this.guestLocalGKDiveState !== 'none') {
         gkDiveState = this.guestLocalGKDiveState;
-      } else if (controlled.animState === 'gk_dive_left') {
+      } else if (
+        controlled.animState === 'gk_dive_left' ||
+        controlled.animState === 'gk_parry_left'
+      ) {
         gkDiveState = 'left';
-      } else if (controlled.animState === 'gk_dive_right') {
+      } else if (
+        controlled.animState === 'gk_dive_right' ||
+        controlled.animState === 'gk_parry_right'
+      ) {
         gkDiveState = 'right';
       } else if (controlled.animState === 'gk_catch') {
         gkDiveState = 'catch';
@@ -5497,6 +7759,7 @@ export class MatchEngine implements IMatchEngine {
     const sprinting =
       (this.inputManager.isSprinting() || this.externalSprint) &&
       (controlled ? controlled.stamina > 4 : false);
+    const dramaFocusPos = this.computeDramaFocusPos(players);
 
     const camOut = this.cameraDirector.update(dt, this.elapsed, {
       phase: this.phase,
@@ -5517,6 +7780,9 @@ export class MatchEngine implements IMatchEngine {
         y: Math.max(0.9, ballPos.y),
         z: ballPos.z,
       },
+      dramaFocusPos,
+      freeKick: useGameStore.getState().freeKick,
+      penaltyShootout: useGameStore.getState().penaltyShootout,
     });
 
     this.characters.updateFPGloves(

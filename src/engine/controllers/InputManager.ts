@@ -258,7 +258,22 @@ export class InputManager {
    * - Bench: Rage emote
    */
   private triggerPassOrPrimary(fromRightMouse = false): void {
-    const { humanSlot } = useGameStore.getState();
+    const store = useGameStore.getState();
+    const { humanSlot } = store;
+
+    if (store.phase === 'penalty_shootout') {
+      if (store.penaltyShootout.humanTurnRole === 'goalkeeper') {
+        commandBus.emit({ type: 'gkDive', dir: this.computeGKDiveDir() });
+      } else if (store.penaltyShootout.humanTurnRole === 'kicker') {
+        commandBus.emit({ type: 'shootoutKick', dirX: 0, power: 0.86 });
+      }
+      return;
+    }
+
+    if (store.phase === 'free_kick_setup' && store.freeKick.isHumanTaker) {
+      commandBus.emit({ type: 'pass' });
+      return;
+    }
 
     if (humanSlot.isBenched) {
       commandBus.emit({ type: 'benchEmote', kind: 'rage' });
@@ -297,7 +312,35 @@ export class InputManager {
    * - Spectator: Cheer / Fireworks
    */
   private triggerShootStart(fromLeftMouse: boolean): void {
-    const { humanSlot } = useGameStore.getState();
+    const store = useGameStore.getState();
+    const { humanSlot } = store;
+
+    if (store.phase === 'penalty_shootout') {
+      if (store.penaltyShootout.humanTurnRole === 'kicker') {
+        if (!this.isChargingShot) {
+          this.isChargingShot = true;
+          this.curlDeltaAccum = 0;
+          commandBus.emit({ type: 'shootStart' });
+        }
+      } else if (store.penaltyShootout.humanTurnRole === 'goalkeeper') {
+        commandBus.emit({ type: 'gkDive', dir: this.computeGKDiveDir() });
+      }
+      return;
+    }
+
+    if (store.phase === 'free_kick_setup' && store.freeKick.isHumanTaker) {
+      if (fromLeftMouse) {
+        if (!this.isChargingShot) {
+          this.isChargingShot = true;
+          this.curlDeltaAccum = 0;
+          commandBus.emit({ type: 'shootStart' });
+        }
+      } else {
+        commandBus.emit({ type: 'pass' });
+      }
+      return;
+    }
+
     if (humanSlot.isBenched) return;
 
     if (humanSlot.role === 'outfield') {
@@ -427,11 +470,71 @@ export class InputManager {
 
     const { humanSlot } = store;
 
+    // Dedicated Penalty Shootout keyboard controls (A/W/D/Arrows/Space for both Kicker and GK turns)
+    if (store.phase === 'penalty_shootout') {
+      const so = store.penaltyShootout;
+      if (so.humanTurnRole === 'kicker' && so.stage === 'awaiting_kick') {
+        if (e.code === 'KeyA' || e.code === 'ArrowLeft') {
+          commandBus.emit({ type: 'shootoutKick', dirX: -1, power: 0.86 });
+          return;
+        }
+        if (e.code === 'KeyW' || e.code === 'ArrowUp') {
+          commandBus.emit({ type: 'shootoutKick', dirX: 0, power: 0.86 });
+          return;
+        }
+        if (e.code === 'KeyD' || e.code === 'ArrowRight') {
+          commandBus.emit({ type: 'shootoutKick', dirX: 1, power: 0.86 });
+          return;
+        }
+        if (e.code === 'Space' || e.code === 'KeyE') {
+          if (!this.isChargingShot) {
+            this.isChargingShot = true;
+            this.curlDeltaAccum = 0;
+            commandBus.emit({ type: 'shootStart' });
+          }
+          return;
+        }
+      } else if (
+        so.humanTurnRole === 'goalkeeper' &&
+        (so.stage === 'awaiting_kick' || so.stage === 'ball_in_flight')
+      ) {
+        if (e.code === 'KeyA' || e.code === 'ArrowLeft') {
+          commandBus.emit({ type: 'gkDive', dir: 'left' });
+          return;
+        }
+        if (e.code === 'KeyD' || e.code === 'ArrowRight') {
+          commandBus.emit({ type: 'gkDive', dir: 'right' });
+          return;
+        }
+        if (e.code === 'KeyW' || e.code === 'ArrowUp') {
+          commandBus.emit({ type: 'gkDive', dir: 'center' });
+          return;
+        }
+        if (e.code === 'Space') {
+          commandBus.emit({ type: 'gkDive', dir: this.computeGKDiveDir() });
+          return;
+        }
+      }
+      if (e.code === 'KeyT') {
+        commandBus.emit({ type: 'switchCamera' });
+      }
+      return;
+    }
+
     switch (e.code) {
       case 'Space':
         if (store.phase === 'goal_replay') {
           this.cancelSpaceHold();
           commandBus.emit({ type: 'skipGoalReplay' });
+          break;
+        }
+        if (store.phase === 'free_kick_setup' && store.freeKick.isHumanTaker) {
+          this.cancelSpaceHold();
+          if (!this.isChargingShot) {
+            this.isChargingShot = true;
+            this.curlDeltaAccum = 0;
+            commandBus.emit({ type: 'shootStart' });
+          }
           break;
         }
         if (!humanSlot.isBenched && humanSlot.role === 'outfield') {
@@ -447,10 +550,20 @@ export class InputManager {
         break;
 
       case 'KeyE':
+        if (store.phase === 'free_kick_setup' && store.freeKick.isHumanTaker) {
+          commandBus.emit({ type: 'pass' });
+          break;
+        }
         this.triggerShootStart(false);
         break;
 
       case 'KeyC':
+        if (!humanSlot.isBenched && humanSlot.role === 'outfield') {
+          commandBus.emit({ type: 'callForPass' });
+        }
+        break;
+
+      case 'KeyX':
         if (!humanSlot.isBenched && humanSlot.role === 'outfield') {
           commandBus.emit({ type: 'skillMove' });
         }
@@ -527,6 +640,12 @@ export class InputManager {
         }
         break;
 
+      case 'Digit5':
+        if (humanSlot.role === 'referee') {
+          commandBus.emit({ type: 'refFreeKick' });
+        }
+        break;
+
       default:
         break;
     }
@@ -546,7 +665,11 @@ export class InputManager {
     }
 
     if (e.code === 'Space') {
-      this.finishSpaceHold(false);
+      if (this.isChargingShot) {
+        this.triggerShootEnd();
+      } else {
+        this.finishSpaceHold(false);
+      }
     }
 
     if (e.code === 'KeyE') {

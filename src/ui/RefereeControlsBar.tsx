@@ -11,6 +11,7 @@ function RefBtn({
   tone,
   disabled,
   icon,
+  testId,
 }: {
   k: string;
   label: string;
@@ -18,11 +19,13 @@ function RefBtn({
   tone: string;
   disabled?: boolean;
   icon?: ReactNode;
+  testId?: string;
 }) {
   const dispatch = useGameStore((s) => s.dispatchCommand);
   return (
     <button
       type="button"
+      data-testid={testId}
       disabled={disabled}
       onClick={() => dispatch(cmd)}
       className="btn-ghost h-11 gap-2 px-3 text-sm whitespace-nowrap disabled:opacity-40"
@@ -65,11 +68,18 @@ export default function RefereeControlsBar() {
         )}
       </div>
 
-      <div className="glass flex items-center gap-2 rounded-2xl p-2">
+      <div className="glass flex flex-wrap items-center justify-center gap-2 rounded-2xl p-2">
         <RefBtn k="Space" label="صافرة" cmd={{ type: 'refWhistle' }} tone="#e2e8f0" icon={<Megaphone size={16} />} />
         <RefBtn k="1" label="كارت أصفر 🟨" cmd={{ type: 'refYellowCard' }} tone="#fbbf24" disabled={!target} />
         <RefBtn k="2" label="طرد أحمر 🟥" cmd={{ type: 'refRedCard' }} tone="#ff2e4c" disabled={!target} />
         <RefBtn k="3" label="بلنتي بمزاجك! 🎯" cmd={{ type: 'refPenalty' }} tone="#10b981" />
+        <RefBtn
+          k="5"
+          label="ركلة حرة ⚽"
+          cmd={{ type: 'refFreeKick' }}
+          tone="#f97316"
+          testId="ref-free-kick-btn"
+        />
         <RefBtn
           k="4"
           label="مراجعة VAR 📺"

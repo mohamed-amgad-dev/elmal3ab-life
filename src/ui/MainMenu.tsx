@@ -3,11 +3,13 @@ import { Flame, Gamepad2, Globe, Keyboard, Sparkles, Trophy } from 'lucide-react
 import { useGameStore } from '../store/useGameStore';
 import { DEFAULT_HUMAN_SLOT } from '../types/game';
 import { isInviteAutoJoinDismissed, readInviteRoomCode } from './networkBridge';
-import { MuteButton } from './uiKit';
+import { DIFFICULTY_LEVELS, DIFFICULTY_META, MuteButton } from './uiKit';
 
 export default function MainMenu() {
   const setPhase = useGameStore((s) => s.setPhase);
   const networkMode = useGameStore((s) => s.network.mode);
+  const aiDifficulty = useGameStore((s) => s.rules.aiDifficulty);
+  const setAIDifficulty = useGameStore((s) => s.setAIDifficulty);
   const setControlsOpen = useGameStore((s) => s.setControlsOpen);
   const applyPreset = useGameStore((s) => s.applyPreset);
   const setHumanSlot = useGameStore((s) => s.setHumanSlot);
@@ -71,7 +73,40 @@ export default function MainMenu() {
           </p>
         </div>
 
-        <div className="mt-10 flex w-full max-w-md flex-col gap-4">
+        <div className="mt-6 flex w-full max-w-md flex-col gap-3.5">
+          {/* Pre-Match Difficulty Selector Strip */}
+          <div className="glass rounded-2xl border border-white/15 px-3.5 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-black text-slate-200">مستوى البوتات:</span>
+              <div className="flex items-center gap-1.5" role="group" aria-label="مستوى البوتات">
+                {DIFFICULTY_LEVELS.map((level) => {
+                  const meta = DIFFICULTY_META[level];
+                  const active = aiDifficulty === level;
+                  return (
+                    <button
+                      key={level}
+                      type="button"
+                      data-testid={`difficulty-${level}`}
+                      aria-pressed={active}
+                      onClick={() => setAIDifficulty(level)}
+                      className={`flex items-center gap-1 rounded-xl border px-3 py-1.5 text-xs font-black transition ${
+                        active
+                          ? `${meta.badgeClass} shadow-[0_0_16px_rgba(251,191,36,0.22)] ring-1 ring-white/25`
+                          : 'border-white/10 bg-slate-900/55 text-slate-300 hover:border-white/25 hover:text-white'
+                      }`}
+                    >
+                      <span>{meta.label}</span>
+                      <span>{meta.emoji}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <p className="mt-1.5 text-center text-[11px] font-bold text-slate-300/90">
+              {DIFFICULTY_META[aiDifficulty].desc}
+            </p>
+          </div>
+
           <button
             type="button"
             onClick={() => setPhase('lobby')}
@@ -94,14 +129,32 @@ export default function MainMenu() {
             العب أونلاين مع صاحبك 🌐
           </button>
 
-          <button
-            type="button"
-            onClick={quickPlay}
-            className="btn-cta btn-fire h-14 px-6 text-xl"
-          >
-            <Flame size={24} />
-            ماتش ضحك سريع! 🔥
-          </button>
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={quickPlay}
+              className="btn-cta btn-fire h-14 px-4 text-lg"
+            >
+              <Flame size={20} />
+              ماتش سريع! 🔥
+            </button>
+
+            <button
+              type="button"
+              data-testid="menu-shootout-btn"
+              onClick={() => dispatchCommand({ type: 'startPenaltyShootout', fromDraw: false })}
+              className="btn-cta h-14 px-4 text-lg"
+              style={{
+                color: '#1e1b4b',
+                background: 'linear-gradient(135deg, #fde047, #f59e0b 55%, #d97706)',
+                boxShadow:
+                  '0 0 0 1px rgba(253,224,71,0.65), 0 0 26px rgba(245,158,11,0.55), 0 8px 0 -2px #92400e',
+              }}
+            >
+              <Trophy size={20} />
+              ركلات الترجيح 🥅
+            </button>
+          </div>
 
           <div className="flex items-center justify-center gap-2 text-xs font-semibold text-slate-300/80">
             <Sparkles size={14} className="text-amber-300" />

@@ -104,6 +104,22 @@ export default function FullTimeModal() {
             </>
           ) : (
             <>
+              {draw && (
+                <button
+                  type="button"
+                  data-testid="fulltime-shootout-btn"
+                  onClick={() => dispatch({ type: 'startPenaltyShootout', fromDraw: true })}
+                  className="btn-cta anim-cta-pulse h-14 px-7 text-lg"
+                  style={{
+                    color: '#1e1b4b',
+                    background: 'linear-gradient(135deg, #fde047, #f59e0b 55%, #d97706)',
+                    boxShadow:
+                      '0 0 0 1px rgba(253,224,71,0.65), 0 0 28px rgba(245,158,11,0.55), 0 8px 0 -2px #92400e',
+                  }}
+                >
+                  <Trophy size={22} /> حسم بالتعادل: ركلات الترجيح 🥅
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => dispatch({ type: 'restartMatch' })}

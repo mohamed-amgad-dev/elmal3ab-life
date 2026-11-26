@@ -650,6 +650,160 @@ export class SoundEngine implements ISoundEngine {
     }
   }
 
+  public playPassCall(): void {
+    const audio = this.ready();
+    if (!audio) return;
+    const { ctx, out } = audio;
+    const t = ctx.currentTime;
+
+    // Two-syllable energetic teammate pass call ("باصيلي!")
+    const syllables = [
+      { offset: 0, dur: 0.11, fStart: 510, fEnd: 665, formant: 1280, gain: 0.22 },
+      { offset: 0.13, dur: 0.16, fStart: 575, fEnd: 790, formant: 1560, gain: 0.25 },
+    ];
+
+    for (const s of syllables) {
+      const start = t + s.offset;
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const amp = ctx.createGain();
+
+      osc1.type = 'sawtooth';
+      osc2.type = 'triangle';
+      osc1.frequency.setValueAtTime(s.fStart, start);
+      osc1.frequency.exponentialRampToValueAtTime(s.fEnd, start + s.dur);
+      osc2.frequency.setValueAtTime(s.fStart * 2, start);
+      osc2.frequency.exponentialRampToValueAtTime(s.fEnd * 2, start + s.dur);
+
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(s.formant, start);
+      filter.Q.setValueAtTime(2.4, start);
+
+      amp.gain.setValueAtTime(0.0001, start);
+      amp.gain.linearRampToValueAtTime(s.gain, start + 0.014);
+      amp.gain.exponentialRampToValueAtTime(0.0001, start + s.dur);
+
+      osc1.connect(filter);
+      osc2.connect(filter);
+      filter.connect(amp);
+      amp.connect(out);
+
+      osc1.start(start);
+      osc2.start(start);
+      osc1.stop(start + s.dur + 0.02);
+      osc2.stop(start + s.dur + 0.02);
+    }
+  }
+
+  public playWallSpray(): void {
+    const audio = this.ready();
+    if (!audio) return;
+    const { ctx, out } = audio;
+    const t = ctx.currentTime;
+
+    // Crisp nozzle click transient
+    const click = ctx.createOscillator();
+    const clickGain = ctx.createGain();
+    click.type = 'triangle';
+    click.frequency.setValueAtTime(1850, t);
+    click.frequency.exponentialRampToValueAtTime(540, t + 0.022);
+    clickGain.gain.setValueAtTime(0.14, t);
+    clickGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.026);
+    click.connect(clickGain);
+    clickGain.connect(out);
+    click.start(t);
+    click.stop(t + 0.03);
+
+    // Vanishing-foam aerosol hiss
+    if (this.noiseBuffer) {
+      const dur = 0.42;
+      const hiss = ctx.createBufferSource();
+      hiss.buffer = this.noiseBuffer;
+
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.setValueAtTime(2100, t);
+
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(4300, t);
+      bp.frequency.exponentialRampToValueAtTime(2850, t + dur);
+      bp.Q.setValueAtTime(1.5, t);
+
+      const hGain = ctx.createGain();
+      hGain.gain.setValueAtTime(0.0001, t);
+      hGain.gain.linearRampToValueAtTime(0.18, t + 0.025);
+      hGain.gain.setValueAtTime(0.15, t + 0.24);
+      hGain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+      hiss.connect(hp);
+      hp.connect(bp);
+      bp.connect(hGain);
+      hGain.connect(out);
+
+      hiss.start(t);
+      hiss.stop(t + dur + 0.02);
+    }
+  }
+
+  public playShootoutTension(): void {
+    const audio = this.ready();
+    if (!audio) return;
+    const { ctx, out } = audio;
+    const t = ctx.currentTime;
+
+    // Stadium "lub-dub" low heartbeat pulse
+    const beats = [
+      { offset: 0, dur: 0.19, f0: 74, f1: 34, vol: 0.34 },
+      { offset: 0.23, dur: 0.24, f0: 82, f1: 36, vol: 0.28 },
+    ];
+    for (const b of beats) {
+      const start = t + b.offset;
+      const sub = ctx.createOscillator();
+      const sGain = ctx.createGain();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(b.f0, start);
+      sub.frequency.exponentialRampToValueAtTime(b.f1, start + b.dur);
+
+      sGain.gain.setValueAtTime(0.0001, start);
+      sGain.gain.linearRampToValueAtTime(b.vol, start + 0.008);
+      sGain.gain.exponentialRampToValueAtTime(0.0001, start + b.dur);
+
+      sub.connect(sGain);
+      sGain.connect(out);
+      sub.start(start);
+      sub.stop(start + b.dur + 0.02);
+    }
+
+    // Dark suspenseful fifth swell (A2 + E3)
+    const padFreqs = [110.0, 164.81];
+    const padDur = 1.1;
+    for (const freq of padFreqs) {
+      const osc = ctx.createOscillator();
+      const lp = ctx.createBiquadFilter();
+      const pGain = ctx.createGain();
+
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+
+      lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(260, t);
+      lp.frequency.exponentialRampToValueAtTime(520, t + 0.45);
+      lp.frequency.exponentialRampToValueAtTime(220, t + padDur);
+
+      pGain.gain.setValueAtTime(0.0001, t);
+      pGain.gain.linearRampToValueAtTime(0.11, t + 0.25);
+      pGain.gain.exponentialRampToValueAtTime(0.0001, t + padDur);
+
+      osc.connect(lp);
+      lp.connect(pGain);
+      pGain.connect(out);
+      osc.start(t);
+      osc.stop(t + padDur + 0.02);
+    }
+  }
+
   public dispose(): void {
     this.disposed = true;
     try {

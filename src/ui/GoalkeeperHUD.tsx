@@ -3,8 +3,11 @@ import { useGameStore } from '../store/useGameStore';
 import { KeyPill } from './uiKit';
 
 export default function GoalkeeperHUD() {
+  const phase = useGameStore((s) => s.phase);
   const cooldown = useGameStore((s) => s.gkDiveCooldown);
   const ready = cooldown <= 0.05;
+
+  if (phase === 'penalty_shootout') return null;
 
   return (
     <>

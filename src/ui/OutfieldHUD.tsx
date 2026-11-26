@@ -1,4 +1,4 @@
-import { Crosshair, Footprints, Gamepad2, MousePointerClick, Zap } from 'lucide-react';
+import { Crosshair, Footprints, Gamepad2, Megaphone, MousePointerClick, Zap } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import { Bar, CAMERA_LABEL, KeyPill } from './uiKit';
 
@@ -12,6 +12,8 @@ export default function OutfieldHUD() {
   const phase = useGameStore((s) => s.phase);
   const skillCooldown = useGameStore((s) => s.skillCooldown);
   const diveCooldown = useGameStore((s) => s.diveCooldown);
+  const callForPass = useGameStore((s) => s.callForPass);
+  const dispatch = useGameStore((s) => s.dispatchCommand);
   const rules = useGameStore((s) => s.rules);
   const slot = useGameStore((s) => s.humanSlot);
   const activeCamera = useGameStore((s) => s.activeCamera);
@@ -95,6 +97,23 @@ export default function OutfieldHUD() {
       )}
 
       <div className="absolute bottom-3 left-1/2 w-[960px] max-w-[calc(100vw-24px)] -translate-x-1/2">
+        {callForPass.active && (
+          <div className="pointer-events-none mb-2 flex justify-center">
+            <div
+              data-testid="call-for-pass-active"
+              className="anim-pop-in flex items-center gap-2 rounded-full border-2 border-amber-300/90 bg-gradient-to-r from-amber-500/30 via-emerald-500/30 to-amber-500/30 px-4 py-1 text-xs font-black text-amber-100 shadow-[0_0_24px_rgba(251,191,36,0.65)] backdrop-blur-md"
+            >
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-300 anim-blink" />
+              <span>باصيلي! 📣</span>
+              {callForPass.remainingSec > 0.05 && (
+                <span dir="ltr" className="tabular-nums text-amber-200">
+                  {callForPass.remainingSec.toFixed(1)}s
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <div
           className={`glass rounded-2xl px-4 py-3 transition ${
             isSweetSpot ? 'glow-emerald' : charging ? (isOver ? 'glow-crimson' : 'glow-gold') : ''
@@ -179,15 +198,42 @@ export default function OutfieldHUD() {
               </div>
             </div>
 
-            <span
-              className={`shrink-0 rounded-full border px-3 py-1 text-xs font-black whitespace-nowrap ${
-                canSwitch
-                  ? 'border-cyan-300/60 bg-cyan-400/15 text-cyan-200'
-                  : 'border-amber-300/60 bg-amber-400/15 text-amber-200'
-              }`}
-            >
-              {canSwitch ? 'تبديل اللعيبة 🔄' : 'لاعب واحد 🔒'}
-            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                data-testid="call-for-pass-btn"
+                disabled={!callForPass.active && callForPass.cooldownSec > 0.05}
+                onClick={() => dispatch({ type: 'callForPass' })}
+                title="اطلب التمريرة من زميلك (C)"
+                className={`pointer-events-auto flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-black whitespace-nowrap transition ${
+                  callForPass.active
+                    ? 'border-amber-300/90 bg-amber-400/25 text-amber-100 shadow-[0_0_18px_rgba(251,191,36,0.6)] anim-blink'
+                    : callForPass.cooldownSec > 0.05
+                      ? 'border-slate-700/60 bg-slate-900/50 text-slate-400 opacity-60'
+                      : 'border-emerald-400/60 bg-emerald-500/15 text-emerald-100 hover:border-emerald-300 hover:bg-emerald-500/25'
+                }`}
+              >
+                <span className="kbd">C</span>
+                <Megaphone size={13} />
+                <span>
+                  {callForPass.active
+                    ? 'باصيلي! 📣'
+                    : callForPass.cooldownSec > 0.05
+                      ? `باصيلي ${callForPass.cooldownSec.toFixed(1)}s`
+                      : 'باصيلي! 📣'}
+                </span>
+              </button>
+
+              <span
+                className={`shrink-0 rounded-full border px-3 py-1 text-xs font-black whitespace-nowrap ${
+                  canSwitch
+                    ? 'border-cyan-300/60 bg-cyan-400/15 text-cyan-200'
+                    : 'border-amber-300/60 bg-amber-400/15 text-amber-200'
+                }`}
+              >
+                {canSwitch ? 'تبديل اللعيبة 🔄' : 'لاعب واحد 🔒'}
+              </span>
+            </div>
           </div>
 
           <div className="mt-2 flex flex-wrap items-center justify-center gap-1">
@@ -197,8 +243,10 @@ export default function OutfieldHUD() {
             <KeyPill k="Shift" label="سبرينت + زقة كورة" hint="امسك Shift للجري السريع واضغطه مع الكورة لزقة للأمام" />
             <KeyPill
               k="C"
-              label={skillCooldown > 0.05 ? `ترقيصة ${skillCooldown.toFixed(1)}` : 'ترقيصة'}
-              dim={skillCooldown > 0.05}
+              label={skillCooldown > 0.05 ? `نداء / ترقيصة ${skillCooldown.toFixed(1)}` : 'نداء تمرير / ترقيصة'}
+              active={callForPass.active}
+              dim={!callForPass.active && skillCooldown > 0.05}
+              hint="C: اطلب التمريرة بدون كورة أو ترقيصة مع الكورة"
             />
             <KeyPill k="F" label="زحلقة" />
             <KeyPill

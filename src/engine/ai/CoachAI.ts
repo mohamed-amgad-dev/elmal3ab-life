@@ -1,11 +1,17 @@
 import type {
   AdminRules,
+  CoachDisciplineStats,
   PlayerEntityState,
   TacticalStance,
   TeamId,
   Vec3,
 } from '../../types/game';
 import type { StadiumConfig } from '../../types/stadium';
+import {
+  CoachDisciplineTracker,
+  evaluateCoachSubstitution,
+  type CoachSubTrigger,
+} from './CoachDiscipline';
 
 export interface CoachAIContext {
   coach: PlayerEntityState;
@@ -17,6 +23,12 @@ export interface CoachAIContext {
   config: StadiumConfig;
   rules: AdminRules;
   isHumanCoach: boolean;
+  /** Optional shared tracker owned by MatchEngine so human and AI subs share caps & cooldowns. */
+  disciplineTracker?: CoachDisciplineTracker;
+  /** True when a substitution is already queued/pending for this team. */
+  hasPendingSub?: boolean;
+  /** Optional elapsed match time in seconds; defaults to `rules.matchDurationSec - clockSec`. */
+  matchElapsedSec?: number;
   dt: number;
   elapsed: number;
 }
@@ -25,7 +37,14 @@ export type CoachAIAction =
   | { kind: 'none' }
   | { kind: 'shout'; text: string }
   | { kind: 'setTactic'; stance: TacticalStance; shoutText: string }
-  | { kind: 'subToBench'; playerId: string; shoutText: string };
+  | {
+      kind: 'subToBench';
+      playerId: string;
+      inPlayerId: string;
+      reason: string;
+      trigger: CoachSubTrigger;
+      shoutText: string;
+    };
 
 export interface CoachAIDecision {
   targetPos: Vec3;
@@ -46,18 +65,29 @@ const TOUCHLINE_SHOUTS = [
  * Animated Touchline Coach AI:
  * - Paces energetically along the technical zone facing the pitch.
  * - Adjusts team TacticalStance dynamically based on score & remaining clock.
- * - In Chaos Mode (`enableCoachBench`), occasionally substitutes tired or booked AI players
- *   and shouts comedic threats from the sideline!
+ * - Uses strict football-law substitution discipline (`CoachDiscipline`):
+ *   hard 3-sub cap, 42s per-team cooldown, 35s minimum elapsed gate (except
+ *   emergency fatigue < 18), zero yellow-card ping-pong, and genuine football triggers only.
  */
 export class CoachAI {
   private readonly shoutTimers = new Map<TeamId, number>();
   private readonly tacticTimers = new Map<TeamId, number>();
-  private readonly subTimers = new Map<TeamId, number>();
+  private readonly subCheckTimers = new Map<TeamId, number>();
+  private readonly internalDiscipline = new CoachDisciplineTracker();
 
   reset(): void {
     this.shoutTimers.clear();
     this.tacticTimers.clear();
-    this.subTimers.clear();
+    this.subCheckTimers.clear();
+    this.internalDiscipline.reset();
+  }
+
+  getDisciplineTracker(): CoachDisciplineTracker {
+    return this.internalDiscipline;
+  }
+
+  getDisciplineSnapshot(): CoachDisciplineStats {
+    return this.internalDiscipline.getSnapshot();
   }
 
   evaluate(ctx: CoachAIContext): CoachAIDecision {
@@ -70,9 +100,16 @@ export class CoachAI {
       config,
       rules,
       isHumanCoach,
+      disciplineTracker,
+      hasPendingSub,
       dt,
       elapsed,
     } = ctx;
+
+    const tracker = disciplineTracker ?? this.internalDiscipline;
+    if (!disciplineTracker) {
+      this.internalDiscipline.tickTeam(team, dt);
+    }
 
     const zone = config.coachZones[team];
     const paceOffset = Math.sin(elapsed * 1.15 + (team === 'red' ? 0 : 2.1)) * 2.4;
@@ -90,11 +127,11 @@ export class CoachAI {
 
     const shoutCd = Math.max(0, (this.shoutTimers.get(team) ?? 6) - dt);
     const tacticCd = Math.max(0, (this.tacticTimers.get(team) ?? 12) - dt);
-    const subCd = Math.max(0, (this.subTimers.get(team) ?? 22) - dt);
+    const subCheckCd = Math.max(0, (this.subCheckTimers.get(team) ?? 2.0) - dt);
 
     this.shoutTimers.set(team, shoutCd);
     this.tacticTimers.set(team, tacticCd);
-    this.subTimers.set(team, subCd);
+    this.subCheckTimers.set(team, subCheckCd);
 
     const oppTeam: TeamId = team === 'red' ? 'blue' : 'red';
     const scoreDiff = score[team] - score[oppTeam];
@@ -125,34 +162,49 @@ export class CoachAI {
       }
     }
 
-    // 2. Chaos Mode automatic substitution for tired / booked AI players
-    if (rules.enableCoachBench && subCd <= 0) {
-      const hasBenchReserve = teamPlayers.some(
-        (p) => p.role === 'outfield' && p.isBenched && !p.isSentOff
-      );
-      if (hasBenchReserve) {
-        const subCandidate = teamPlayers.find(
-          (p) =>
-            p.role === 'outfield' &&
-            !p.isBenched &&
-            !p.isSentOff &&
-            !p.isHumanControlled &&
-            (p.stamina < 42 || p.yellowCards >= 1)
-        );
+    // 2. Disciplined, football-law substitutions (real triggers only — no blind timer spam)
+    if (rules.enableCoachBench && subCheckCd <= 0) {
+      const matchElapsedSec =
+        ctx.matchElapsedSec ?? Math.max(0, rules.matchDurationSec - clockSec);
 
-        this.subTimers.set(team, 26 + Math.random() * 14);
-        if (subCandidate) {
-          return {
-            targetPos,
-            facingYaw,
-            action: {
-              kind: 'subToBench',
-              playerId: subCandidate.id,
-              shoutText: `اطلع دكة يا ${subCandidate.name}! كفاية كده 🪑🔥`,
-            },
-          };
+      const subDecision = evaluateCoachSubstitution({
+        team,
+        teamPlayers,
+        scoreDiff,
+        clockSec,
+        matchElapsedSec,
+        tracker,
+        hasPendingSub,
+      });
+
+      if (subDecision) {
+        // If CoachAI is running standalone without an external shared tracker, record immediately.
+        if (!disciplineTracker) {
+          this.internalDiscipline.recordSub(
+            team,
+            subDecision.outPlayer.id,
+            subDecision.inPlayer.id,
+            matchElapsedSec,
+            subDecision.trigger
+          );
         }
+        // Brief guard so we do not double-propose while MatchEngine queues the stoppage
+        this.subCheckTimers.set(team, 8.0);
+        return {
+          targetPos,
+          facingYaw,
+          action: {
+            kind: 'subToBench',
+            playerId: subDecision.outPlayer.id,
+            inPlayerId: subDecision.inPlayer.id,
+            reason: subDecision.reason,
+            trigger: subDecision.trigger,
+            shoutText: subDecision.shoutText,
+          },
+        };
       }
+
+      this.subCheckTimers.set(team, 1.5);
     }
 
     // 3. Energetic Egyptian touchline shouts!

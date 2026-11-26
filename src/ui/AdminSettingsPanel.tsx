@@ -10,6 +10,7 @@ import {
   Shield,
   ShieldCheck,
   Shirt,
+  Sparkles,
   Swords,
   Theater,
   Tv,
@@ -17,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useGameStore } from '../store/useGameStore';
 import type { AdminRules } from '../types/game';
+import { DIFFICULTY_LEVELS, DIFFICULTY_META } from './uiKit';
 
 function Row({
   icon,
@@ -48,17 +50,21 @@ function Opt({
   onClick,
   children,
   tone,
+  testId,
 }: {
   active: boolean;
   onClick: () => void;
   children: ReactNode;
   tone?: 'gold' | 'cyan';
+  testId?: string;
 }) {
   return (
     <button
       type="button"
       data-active={active}
       data-tone={tone}
+      data-testid={testId}
+      aria-pressed={active}
       onClick={onClick}
       className="pill px-3 py-1.5 text-xs"
     >
@@ -116,6 +122,7 @@ function Toggle({
 export default function AdminSettingsPanel() {
   const rules = useGameStore((s) => s.rules);
   const setRules = useGameStore((s) => s.setRules);
+  const setAIDifficulty = useGameStore((s) => s.setAIDifficulty);
   const applyPreset = useGameStore((s) => s.applyPreset);
 
   const set = (p: Partial<AdminRules>) => setRules(p);
@@ -138,6 +145,27 @@ export default function AdminSettingsPanel() {
           <Opt active={rules.preset === 'custom'} tone="gold" onClick={() => set({ preset: 'custom' })}>
             <Settings2 size={14} /> مخصص ⚙️
           </Opt>
+        </Row>
+
+        <Row
+          icon={<Sparkles size={18} />}
+          title="مستوى ذكاء البوتات والحارس"
+          desc={DIFFICULTY_META[rules.aiDifficulty].desc}
+        >
+          {DIFFICULTY_LEVELS.map((level) => {
+            const meta = DIFFICULTY_META[level];
+            return (
+              <Opt
+                key={level}
+                active={rules.aiDifficulty === level}
+                tone={meta.tone}
+                testId={`lobby-difficulty-${level}`}
+                onClick={() => setAIDifficulty(level)}
+              >
+                {meta.label} {meta.emoji}
+              </Opt>
+            );
+          })}
         </Row>
 
         <div className="grid grid-cols-2 gap-2.5">
