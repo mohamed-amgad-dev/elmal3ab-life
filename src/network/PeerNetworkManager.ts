@@ -9,6 +9,7 @@ import {
 } from '../types/network';
 import type { INetworkManager, QuickChatNetworkEvent } from '../types/network';
 import type { HumanSlotConfig } from '../types/game';
+import { HttpMatchRelay, type RelayWirePacket } from './HttpMatchRelay';
 
 /* ───────────────────────── Constants ───────────────────────── */
 
@@ -16,18 +17,17 @@ const ROOM_PREFIX = 'ML3B-';
 const PEER_ID_PREFIX = 'elmal3ab-v3-ml3b-';
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ROOM_CODE_LENGTH = 4;
-const MAX_CREATE_ATTEMPTS = 5; // first try + 4 retries on `unavailable-id`
-const JOIN_TIMEOUT_MS = 10_000;
 const PING_INTERVAL_MS = 1500;
+const RELAY_PEER_TIMEOUT_MS = 20_000;
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
 ];
 
 const MSG_ROOM_NOT_FOUND = 'ملقيناش الروم دي — اتأكد إن صاحبك فاتح اللوبي والكود صح!';
 const MSG_BAD_CODE = 'الكود مش مظبوط — لازم يبقى شكله ML3B-XXXX';
-const MSG_TIMEOUT = 'الاتصال أخد وقت طويل — اتأكد من النت وجرّب تاني!';
 const MSG_GENERIC = 'حصلت مشكلة في الاتصال — جرّب تاني!';
 const MSG_CREATE_FAILED = 'معرفناش نفتح الروم — اتأكد من النت وجرّب تاني!';
 const MSG_HOST_LEFT = 'صاحبك قفل الروم أو النت فصل عنده.';
@@ -55,6 +55,13 @@ function randomRoomSuffix(): string {
   return out.join('');
 }
 
+function generatePlayerId(prefix: string): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
+  }
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /** Accepts `XXXX`, `ML3B-XXXX`, `ml3bxxxx` or a full URL containing `?room=ML3B-XXXX`. */
 export function parseRoomSuffix(raw: string): string | null {
   let text = (raw ?? '').trim();
@@ -79,10 +86,13 @@ export function parseRoomSuffix(raw: string): string | null {
 export class PeerNetworkManager implements INetworkManager {
   private peer: Peer | null = null;
   private conn: DataConnection | null = null;
+  private relay: HttpMatchRelay | null = null;
+  private relayPeerConnected = false;
+  private lastRelayPeerSeenAt = 0;
   private session = 0;
   private manualClose = false;
+  private readonly localPlayerId = generatePlayerId('ml');
 
-  private joinTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pingSeq = 0;
 
@@ -91,6 +101,7 @@ export class PeerNetworkManager implements INetworkManager {
   private outgoingCall: MediaConnection | null = null;
   private incomingCall: MediaConnection | null = null;
   private audioEl: HTMLAudioElement | null = null;
+  private beforeUnloadHandler: (() => void) | null = null;
 
   private readonly guestInputSubs = new Set<Listener<GuestInputPacket>>();
   private readonly snapshotSubs = new Set<Listener<WorldSnapshotPacket>>();
@@ -101,15 +112,20 @@ export class PeerNetworkManager implements INetworkManager {
   constructor() {
     if (typeof window !== 'undefined') {
       (window as unknown as { __ELMAL3AB_NET__?: INetworkManager }).__ELMAL3AB_NET__ = this;
+      this.beforeUnloadHandler = () => {
+        this.relay?.leave();
+      };
+      window.addEventListener('beforeunload', this.beforeUnloadHandler);
     }
   }
 
   /* ───────────── Room creation (Host) ───────────── */
 
-  createRoom(): Promise<string> {
+  async createRoom(): Promise<string> {
     this.teardown(true);
     const session = ++this.session;
     this.manualClose = false;
+
     const store = useGameStore.getState();
     store.setNetworkState({
       mode: 'host',
@@ -120,106 +136,114 @@ export class PeerNetworkManager implements INetworkManager {
       errorMessage: null,
     });
 
-    return new Promise<string>((resolve) => {
-      let attempt = 0;
-      const tryCreate = () => {
-        if (session !== this.session) {
-          resolve('');
-          return;
+    const suffix = randomRoomSuffix();
+    const displayCode = `${ROOM_PREFIX}${suffix}`;
+    const relayRoomCode = `M${suffix}`;
+    const peerId = `${PEER_ID_PREFIX}${suffix.toLowerCase()}`;
+
+    // 1. Primary guaranteed transport: Vercel HTTPS port-443 relay
+    const relay = new HttpMatchRelay(relayRoomCode, this.localPlayerId, true, {
+      onEnvelope: (env) => {
+        if (session !== this.session || this.relay !== relay) return;
+        this.lastRelayPeerSeenAt = Date.now();
+        if (!this.relayPeerConnected) {
+          this.markRelayPeerConnected(true);
         }
-        attempt++;
-        const suffix = randomRoomSuffix();
-        const displayCode = `${ROOM_PREFIX}${suffix}`;
-        const peerId = `${PEER_ID_PREFIX}${suffix.toLowerCase()}`;
-        let peer: Peer;
-        try {
-          peer = new Peer(peerId, { config: { iceServers: ICE_SERVERS } });
-        } catch {
+        this.handleMessage(env.packet, true);
+      },
+      onSyncMeta: ({ peerAlive, rttMs }) => {
+        if (session !== this.session || this.relay !== relay) return;
+        const now = Date.now();
+        if (peerAlive) {
+          this.lastRelayPeerSeenAt = now;
+          if (!this.relayPeerConnected) {
+            this.markRelayPeerConnected(true);
+          }
+        } else if (
+          this.relayPeerConnected &&
+          !this.conn?.open &&
+          this.lastRelayPeerSeenAt > 0 &&
+          now - this.lastRelayPeerSeenAt > RELAY_PEER_TIMEOUT_MS
+        ) {
+          this.handleRelayGuestLeft();
+        }
+
+        if (this.relayPeerConnected && !this.conn?.open) {
+          useGameStore.getState().setNetworkState({ pingMs: rttMs });
+        }
+      },
+      onDisconnected: () => {
+        if (session !== this.session || this.relay !== relay) return;
+        if (!this.conn?.open) {
           this.failHost(session, MSG_CREATE_FAILED);
-          resolve('');
+        }
+      },
+    });
+    this.relay = relay;
+
+    const created = await relay.create();
+    if (session !== this.session) return '';
+
+    if (!created.ok) {
+      this.failHost(session, MSG_CREATE_FAILED);
+      return '';
+    }
+
+    useGameStore.getState().setNetworkState({
+      mode: 'host',
+      status: 'waiting_peer',
+      roomCode: displayCode,
+      peerConnected: false,
+      errorMessage: null,
+    });
+
+    // 2. Opportunistic background PeerJS P2P upgrade (for lower latency when NAT allows + voice)
+    this.startHostPeerBackground(peerId, session);
+
+    return displayCode;
+  }
+
+  private startHostPeerBackground(peerId: string, session: number): void {
+    try {
+      const peer = new Peer(peerId, { config: { iceServers: ICE_SERVERS } });
+      this.peer = peer;
+
+      peer.on('connection', (incoming) => {
+        if (session !== this.session) {
+          incoming.close();
           return;
         }
-        this.peer = peer;
-        let opened = false;
-
-        peer.on('open', () => {
-          if (session !== this.session) return;
-          opened = true;
-          useGameStore.getState().setNetworkState({
-            mode: 'host',
-            status: 'waiting_peer',
-            roomCode: displayCode,
-            peerConnected: false,
-            errorMessage: null,
+        if (this.conn && this.conn.open) {
+          incoming.on('open', () => {
+            try {
+              incoming.send({ type: 'room_full', message: MSG_ROOM_FULL });
+            } catch {
+              /* ignore */
+            }
+            setTimeout(() => incoming.close(), 100);
           });
-          resolve(displayCode);
-        });
+          return;
+        }
+        this.attachConnection(incoming, session, true);
+      });
 
-        peer.on('connection', (incoming) => {
-          if (session !== this.session) {
-            incoming.close();
-            return;
-          }
-          if (this.conn && this.conn.open) {
-            // Room is full: politely refuse the extra visitor.
-            incoming.on('open', () => {
-              try {
-                incoming.send({ type: 'room_full', message: MSG_ROOM_FULL });
-              } catch {
-                /* ignore */
-              }
-              setTimeout(() => incoming.close(), 100);
-            });
-            return;
-          }
-          this.attachConnection(incoming, session, true);
-        });
+      peer.on('call', (call) => this.handleIncomingCall(call, session));
 
-        peer.on('call', (call) => this.handleIncomingCall(call, session));
+      peer.on('disconnected', () => {
+        if (session !== this.session || this.manualClose || peer.destroyed) return;
+        try {
+          peer.reconnect();
+        } catch {
+          /* ignore */
+        }
+      });
 
-        peer.on('disconnected', () => {
-          if (session !== this.session || this.manualClose || peer.destroyed) return;
-          try {
-            peer.reconnect();
-          } catch {
-            /* ignore */
-          }
-        });
-
-        peer.on('error', (err: PeerErrorLike) => {
-          if (session !== this.session) return;
-          if (err.type === 'unavailable-id' && !opened) {
-            try {
-              peer.destroy();
-            } catch {
-              /* ignore */
-            }
-            if (this.peer === peer) this.peer = null;
-            if (attempt < MAX_CREATE_ATTEMPTS) {
-              tryCreate();
-            } else {
-              this.failHost(session, MSG_CREATE_FAILED);
-              resolve('');
-            }
-            return;
-          }
-          if (!opened) {
-            this.failHost(session, MSG_CREATE_FAILED);
-            resolve('');
-            return;
-          }
-          // Post-open errors (e.g. signalling hiccups) must not kill a live room.
-          if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-            try {
-              if (!peer.destroyed) peer.reconnect();
-            } catch {
-              /* ignore */
-            }
-          }
-        });
-      };
-      tryCreate();
-    });
+      peer.on('error', (_err: PeerErrorLike) => {
+        // Non-fatal: Vercel HTTPS relay keeps the room 100% online.
+      });
+    } catch {
+      // Non-fatal: Vercel HTTPS relay keeps the room 100% online.
+    }
   }
 
   private failHost(session: number, message: string): void {
@@ -236,7 +260,7 @@ export class PeerNetworkManager implements INetworkManager {
 
   /* ───────────── Join (Guest) ───────────── */
 
-  joinRoom(rawCode: string): Promise<void> {
+  async joinRoom(rawCode: string): Promise<void> {
     this.teardown(true);
     const session = ++this.session;
     this.manualClose = false;
@@ -251,11 +275,13 @@ export class PeerNetworkManager implements INetworkManager {
         peerConnected: false,
         errorMessage: MSG_BAD_CODE,
       });
-      return Promise.resolve();
+      return;
     }
 
     const displayCode = `${ROOM_PREFIX}${suffix}`;
+    const relayRoomCode = `M${suffix}`;
     const hostPeerId = `${PEER_ID_PREFIX}${suffix.toLowerCase()}`;
+
     store.setNetworkState({
       mode: 'guest',
       status: 'connecting',
@@ -265,20 +291,22 @@ export class PeerNetworkManager implements INetworkManager {
       errorMessage: null,
     });
 
-    // Never rejects: failures surface through `network.status === 'error'`.
-    return new Promise<void>((resolve) => {
-      let settled = false;
-      const settle = () => {
-        if (settled) return;
-        settled = true;
-        this.clearJoinTimer();
-        resolve();
-      };
-      const fail = (message: string) => {
-        if (session !== this.session) {
-          settle();
-          return;
+    // 1. Primary guaranteed join over Vercel HTTPS port-443 relay
+    const relay = new HttpMatchRelay(relayRoomCode, this.localPlayerId, false, {
+      onEnvelope: (env) => {
+        if (session !== this.session || this.relay !== relay) return;
+        this.lastRelayPeerSeenAt = Date.now();
+        this.handleMessage(env.packet, false);
+      },
+      onSyncMeta: ({ rttMs }) => {
+        if (session !== this.session || this.relay !== relay) return;
+        if (!this.conn?.open) {
+          useGameStore.getState().setNetworkState({ pingMs: rttMs });
         }
+      },
+      onDisconnected: (reason) => {
+        if (session !== this.session || this.relay !== relay) return;
+        if (this.conn?.open) return;
         this.teardown(false);
         useGameStore.getState().setNetworkState({
           mode: 'guest',
@@ -286,55 +314,94 @@ export class PeerNetworkManager implements INetworkManager {
           roomCode: displayCode,
           peerConnected: false,
           pingMs: 0,
-          errorMessage: message,
+          errorMessage: reason === 'host_left' ? MSG_HOST_LEFT : MSG_GENERIC,
         });
-        settle();
-      };
+      },
+    });
+    this.relay = relay;
 
-      this.joinTimer = setTimeout(() => {
-        if (!settled) fail(MSG_TIMEOUT);
-      }, JOIN_TIMEOUT_MS);
+    const joined = await relay.join({ type: 'guest_hello' });
+    if (session !== this.session) return;
 
-      let peer: Peer;
-      try {
-        peer = new Peer({ config: { iceServers: ICE_SERVERS } });
-      } catch {
-        fail(MSG_GENERIC);
-        return;
-      }
+    if (!joined.ok) {
+      this.teardown(false);
+      const errMsg =
+        joined.reason === 'room_not_found'
+          ? MSG_ROOM_NOT_FOUND
+          : joined.reason === 'room_full'
+            ? MSG_ROOM_FULL
+            : MSG_GENERIC;
+      useGameStore.getState().setNetworkState({
+        mode: 'guest',
+        status: 'error',
+        roomCode: displayCode,
+        peerConnected: false,
+        pingMs: 0,
+        errorMessage: errMsg,
+      });
+      return;
+    }
+
+    this.markRelayPeerConnected(false);
+
+    // 2. Opportunistic background PeerJS P2P upgrade (for direct low-latency + voice)
+    this.startGuestPeerBackground(hostPeerId, session);
+  }
+
+  private startGuestPeerBackground(hostPeerId: string, session: number): void {
+    try {
+      const peer = new Peer({ config: { iceServers: ICE_SERVERS } });
       this.peer = peer;
       this.remotePeerId = hostPeerId;
 
       peer.on('open', () => {
         if (session !== this.session) return;
-        let conn: DataConnection;
         try {
-          conn = peer.connect(hostPeerId, {
+          const conn = peer.connect(hostPeerId, {
             reliable: true,
             serialization: 'json',
             label: 'elmal3ab-v3',
           });
+          this.attachConnection(conn, session, false);
         } catch {
-          fail(MSG_GENERIC);
-          return;
+          // Non-fatal: Vercel HTTPS relay handles all match traffic
         }
-        this.attachConnection(conn, session, false, () => settle());
       });
 
       peer.on('call', (call) => this.handleIncomingCall(call, session));
 
-      peer.on('error', (err: PeerErrorLike) => {
-        if (session !== this.session) return;
-        if (err.type === 'peer-unavailable') {
-          fail(MSG_ROOM_NOT_FOUND);
-        } else if (!this.conn?.open) {
-          fail(MSG_GENERIC);
-        }
+      peer.on('error', (_err: PeerErrorLike) => {
+        // Non-fatal: Vercel HTTPS relay handles all match traffic
       });
+    } catch {
+      // Non-fatal: Vercel HTTPS relay handles all match traffic
+    }
+  }
 
-      peer.on('disconnected', () => {
-        // Signalling socket dropped: an open DataConnection survives, so do nothing.
-      });
+  private markRelayPeerConnected(isHost: boolean): void {
+    this.relayPeerConnected = true;
+    this.lastRelayPeerSeenAt = Date.now();
+    useGameStore.getState().setNetworkState({
+      status: 'connected',
+      peerConnected: true,
+      errorMessage: null,
+    });
+    if (isHost) {
+      this.sendLobbySync(this.buildLobbyPacket());
+    } else {
+      this.send({ type: 'guest_slot', slot: { ...useGameStore.getState().humanSlot } });
+    }
+  }
+
+  private handleRelayGuestLeft(): void {
+    this.relayPeerConnected = false;
+    this.lastRelayPeerSeenAt = 0;
+    if (this.manualClose) return;
+    useGameStore.getState().setNetworkState({
+      status: 'waiting_peer',
+      peerConnected: false,
+      pingMs: 0,
+      errorMessage: null,
     });
   }
 
@@ -344,14 +411,12 @@ export class PeerNetworkManager implements INetworkManager {
     conn: DataConnection,
     session: number,
     isHost: boolean,
-    onOpen?: () => void,
   ): void {
     this.conn = conn;
     this.remotePeerId = conn.peer;
 
     conn.on('open', () => {
       if (session !== this.session || this.conn !== conn) return;
-      this.clearJoinTimer();
       const store = useGameStore.getState();
       store.setNetworkState({
         status: 'connected',
@@ -364,7 +429,6 @@ export class PeerNetworkManager implements INetworkManager {
       } else {
         this.send({ type: 'guest_slot', slot: { ...useGameStore.getState().humanSlot } });
       }
-      onOpen?.();
     });
 
     conn.on('data', (raw) => {
@@ -385,9 +449,14 @@ export class PeerNetworkManager implements INetworkManager {
     this.conn = null;
     this.stopVoice(false);
     if (this.manualClose) return;
+
+    // If Vercel HTTPS relay is still connected, keep the match running seamlessly!
+    if (this.relay?.isActive() && this.relayPeerConnected) {
+      return;
+    }
+
     const store = useGameStore.getState();
     if (isHost) {
-      // Keep the room alive so the friend can rejoin with the same code.
       store.setNetworkState({
         status: 'waiting_peer',
         peerConnected: false,
@@ -413,10 +482,29 @@ export class PeerNetworkManager implements INetworkManager {
 
   private handleMessage(raw: unknown, isHost: boolean): void {
     if (!raw || typeof raw !== 'object') return;
-    const msg = raw as PeerWireMessage | { type: 'room_full'; message?: string };
+    const msg = raw as RelayWirePacket;
     const store = useGameStore.getState();
 
     switch (msg.type) {
+      case 'guest_hello':
+        if (isHost) {
+          this.markRelayPeerConnected(true);
+        }
+        break;
+      case 'peer_left':
+        if (isHost) {
+          this.handleRelayGuestLeft();
+        } else if (!this.conn?.open) {
+          this.teardown(false);
+          store.setNetworkState({
+            mode: 'guest',
+            status: 'error',
+            peerConnected: false,
+            pingMs: 0,
+            errorMessage: MSG_HOST_LEFT,
+          });
+        }
+        break;
       case 'ping':
         this.send({ type: 'pong', seq: msg.seq, sentAt: msg.sentAt });
         break;
@@ -436,7 +524,6 @@ export class PeerNetworkManager implements INetworkManager {
         store.setGuestSlot(msg.slot);
         const resolved = useGameStore.getState().network.guestSlot;
         this.guestSlotSubs.forEach((cb) => cb(resolved));
-        // Echo the (possibly conflict-resolved) slots back so both peers stay in sync.
         this.sendLobbySync(this.buildLobbyPacket());
         break;
       }
@@ -486,11 +573,16 @@ export class PeerNetworkManager implements INetworkManager {
 
   private send(msg: PeerWireMessage): void {
     const c = this.conn;
-    if (!c || !c.open) return;
-    try {
-      c.send(msg);
-    } catch {
-      /* connection is closing; the close handler will clean up */
+    if (c && c.open) {
+      try {
+        c.send(msg);
+        return;
+      } catch {
+        /* fall through to HTTPS relay */
+      }
+    }
+    if (this.relay?.isActive()) {
+      this.relay.send(msg);
     }
   }
 
@@ -507,13 +599,6 @@ export class PeerNetworkManager implements INetworkManager {
     if (this.pingTimer !== null) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
-    }
-  }
-
-  private clearJoinTimer(): void {
-    if (this.joinTimer !== null) {
-      clearTimeout(this.joinTimer);
-      this.joinTimer = null;
     }
   }
 
@@ -582,7 +667,10 @@ export class PeerNetworkManager implements INetworkManager {
       this.stopVoice(true);
       return false;
     }
-    if (!this.peer || !this.conn?.open || !this.remotePeerId) return false;
+    if (!this.peer || !this.conn?.open || !this.remotePeerId) {
+      store.setNetworkState({ errorMessage: MSG_MIC_DENIED });
+      return false;
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
       store.setNetworkState({ errorMessage: MSG_MIC_DENIED });
       return false;
@@ -604,7 +692,6 @@ export class PeerNetworkManager implements INetworkManager {
       return false;
     }
 
-    // Session ended (or connection dropped) while the permission prompt was open.
     if (session !== this.session || !this.peer || !this.conn?.open || !this.remotePeerId) {
       stream.getTracks().forEach((t) => t.stop());
       return false;
@@ -656,7 +743,6 @@ export class PeerNetworkManager implements INetworkManager {
       call.close();
       return;
     }
-    // Answer with our mic if voice is on; otherwise listen-only (no getUserMedia).
     call.answer(this.localStream ?? undefined);
     this.incomingCall?.close();
     this.incomingCall = call;
@@ -680,11 +766,10 @@ export class PeerNetworkManager implements INetworkManager {
     }
     if (this.audioEl.srcObject !== stream) this.audioEl.srcObject = stream;
     void this.audioEl.play().catch(() => {
-      /* autoplay blocked until next user gesture; `autoplay` attribute retries */
+      /* autoplay blocked until next user gesture */
     });
   }
 
-  /** Stops mic + calls. `syncStore` also flips `voiceActive`/`micMuted` back to defaults. */
   private stopVoice(syncStore: boolean): void {
     this.localStream?.getTracks().forEach((t) => t.stop());
     this.localStream = null;
@@ -715,14 +800,23 @@ export class PeerNetworkManager implements INetworkManager {
 
   private teardown(resetStore: boolean): void {
     this.manualClose = true;
-    this.clearJoinTimer();
     this.stopPing();
     this.stopVoice(false);
     const conn = this.conn;
     const peer = this.peer;
+    const relay = this.relay;
     this.conn = null;
     this.peer = null;
+    this.relay = null;
+    this.relayPeerConnected = false;
+    this.lastRelayPeerSeenAt = 0;
     this.remotePeerId = null;
+
+    try {
+      relay?.leave();
+    } catch {
+      /* ignore */
+    }
     try {
       conn?.close();
     } catch {
@@ -739,12 +833,16 @@ export class PeerNetworkManager implements INetworkManager {
   }
 
   disconnect(): void {
-    this.session++; // invalidate every pending callback
+    this.session++;
     this.teardown(true);
   }
 
   dispose(): void {
-    const hadSession = this.session > 0 || this.peer !== null || this.conn !== null;
+    const hadSession =
+      this.session > 0 ||
+      this.peer !== null ||
+      this.conn !== null ||
+      this.relay !== null;
     this.session++;
     this.teardown(hadSession);
     this.guestInputSubs.clear();
@@ -752,6 +850,10 @@ export class PeerNetworkManager implements INetworkManager {
     this.lobbySyncSubs.clear();
     this.guestSlotSubs.clear();
     this.quickChatSubs.clear();
+    if (this.beforeUnloadHandler && typeof window !== 'undefined') {
+      window.removeEventListener('beforeunload', this.beforeUnloadHandler);
+      this.beforeUnloadHandler = null;
+    }
     if (typeof window !== 'undefined') {
       const w = window as unknown as { __ELMAL3AB_NET__?: INetworkManager };
       if (w.__ELMAL3AB_NET__ === this) delete w.__ELMAL3AB_NET__;
